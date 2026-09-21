@@ -1,0 +1,3 @@
+streamlit>=1.30
+# Descomente para usar PostgreSQL:
+# psycopg2-binary>=2.9

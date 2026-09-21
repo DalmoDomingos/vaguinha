@@ -1,0 +1,26 @@
+# ---- Python ----
+# cache de bytecode e arquivos compilados que o Python gera sozinho
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ---- Ambientes virtuais (NUNCA sobem pro git) ----
+venv/
+.venv/
+env/
+
+# ---- Segredos / credenciais (JAMAIS versione senha ou DSN de banco) ----
+.env
+*.env
+secrets.toml
+.streamlit/secrets.toml
+
+# ---- Banco local de teste ----
+*.sqlite
+*.db
+
+# ---- Editores / SO ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
