@@ -70,6 +70,10 @@ c1.metric("Carros", tot_carros)
 c2.metric("Motos", tot_motos)
 c3.metric("Vagas livres", cap_total - ocup_total)
 
+# Ocupação geral do estacionamento (todas as áreas somadas)
+ocup_geral = pct(ocup_total, cap_total)
+st.progress(ocup_geral, text=f"Ocupação geral — {ocup_geral*100:.0f}% ({ocup_total}/{cap_total})")
+
 st.divider()
 
 # ------------------------------------------------------------------
