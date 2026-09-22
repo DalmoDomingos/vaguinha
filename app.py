@@ -16,6 +16,31 @@ from repository import SQLiteRepository  # , PostgresRepository
 
 st.set_page_config(page_title="Lotação", page_icon="🅿️", layout="centered")
 
+# ------------------------------------------------------------------
+# Estilo: cards de área maiores e fonte um pouco maior
+# ------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+      /* Aumenta um pouco a fonte geral do app */
+      html, body, [data-testid="stAppViewContainer"] { font-size: 17.5px; }
+
+      /* Deixa os cards (expanders) das áreas maiores e com título maior */
+      [data-testid="stExpander"] details {
+          border-radius: 12px;
+      }
+      [data-testid="stExpander"] summary {
+          padding: 1rem 1.2rem;
+      }
+      [data-testid="stExpander"] summary p {
+          font-size: 1.25rem;
+          font-weight: 600;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 
 # ------------------------------------------------------------------
 # Repositório (único, mantido entre reruns do Streamlit)
