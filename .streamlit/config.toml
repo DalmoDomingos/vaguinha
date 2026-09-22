@@ -1,0 +1,5 @@
+# Configuração do Streamlit
+# toolbarMode = "minimal" esconde o botão "Deploy" e o menu de desenvolvedor,
+# deixando a interface limpa para o usuário final.
+[client]
+toolbarMode = "minimal"

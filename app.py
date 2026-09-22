@@ -1,5 +1,5 @@
 """
-Vaguinha - gestão de entrada/saída de veículos em estacionamento.
+Lotação - gestão de entrada/saída de veículos em estacionamento.
 
 Rodar:
     pip install -r requirements.txt
@@ -14,7 +14,32 @@ import streamlit as st
 from config import AREAS, TIPO_CARRO, TIPO_MOTO, cor_da_area
 from repository import SQLiteRepository  # , PostgresRepository
 
-st.set_page_config(page_title="Vaguinha", page_icon="🅿️", layout="centered")
+st.set_page_config(page_title="Lotação", page_icon="🅿️", layout="centered")
+
+# ------------------------------------------------------------------
+# Estilo: cards de área maiores e fonte um pouco maior
+# ------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+      /* Aumenta um pouco a fonte geral do app */
+      html, body, [data-testid="stAppViewContainer"] { font-size: 17.5px; }
+
+      /* Deixa os cards (expanders) das áreas maiores e com título maior */
+      [data-testid="stExpander"] details {
+          border-radius: 12px;
+      }
+      [data-testid="stExpander"] summary {
+          padding: 1rem 1.2rem;
+      }
+      [data-testid="stExpander"] summary p {
+          font-size: 1.25rem;
+          font-weight: 600;
+      }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ------------------------------------------------------------------
@@ -29,6 +54,17 @@ def get_repo():
 
 
 repo = get_repo()
+
+
+# ------------------------------------------------------------------
+# Capacidades editáveis: começam do config.py e ficam na sessão,
+# para o usuário poder ajustar as vagas de cada local pela tela.
+# ------------------------------------------------------------------
+if "caps" not in st.session_state:
+    st.session_state.caps = {
+        lid: {"cap_carro": a["cap_carro"], "cap_moto": a["cap_moto"]}
+        for lid, a in AREAS.items()
+    }
 
 
 # ------------------------------------------------------------------
@@ -54,15 +90,47 @@ def registrar(tipo_id: int, local_id: int, mov: str, cap: int, ocup: int):
 # ------------------------------------------------------------------
 # Cabeçalho
 # ------------------------------------------------------------------
-st.markdown("<h1 style='text-align:center'>Vaguinha</h1>", unsafe_allow_html=True)
+st.markdown("<h1 style='text-align:center'>Lotação</h1>", unsafe_allow_html=True)
 st.caption("Corrida da FAB — controle de vagas por área")
 
+
+# ------------------------------------------------------------------
+# Configuração de vagas por local (editável pelo usuário)
+# ------------------------------------------------------------------
+with st.expander("⚙️ Configurar vagas por local", expanded=False):
+    st.write("Edite a capacidade de **carros** e **motos** de cada área. "
+             "O total é recalculado automaticamente.")
+    linhas = [
+        {"Área": AREAS[lid]["nome"], "Carros": c["cap_carro"], "Motos": c["cap_moto"]}
+        for lid, c in st.session_state.caps.items()
+    ]
+    editado = st.data_editor(
+        linhas,
+        hide_index=True,
+        use_container_width=True,
+        disabled=["Área"],
+        column_config={
+            "Carros": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+            "Motos": st.column_config.NumberColumn(min_value=0, step=1, format="%d"),
+        },
+        key="editor_caps",
+    )
+    # Grava os valores editados de volta na sessão (mesma ordem das linhas)
+    for lid, linha in zip(st.session_state.caps.keys(), editado):
+        st.session_state.caps[lid]["cap_carro"] = int(linha["Carros"] or 0)
+        st.session_state.caps[lid]["cap_moto"] = int(linha["Motos"] or 0)
+
+caps = st.session_state.caps
+
+
+# ------------------------------------------------------------------
+# Resumo geral
+# ------------------------------------------------------------------
 saldos = repo.saldos()  # {(local_id, tipo_veiculo_id): ocupados}
 
-# Resumo geral
 tot_carros = sum(v for (lid, t), v in saldos.items() if t == TIPO_CARRO)
 tot_motos = sum(v for (lid, t), v in saldos.items() if t == TIPO_MOTO)
-cap_total = sum(a["cap_carro"] + a["cap_moto"] for a in AREAS.values())
+cap_total = sum(c["cap_carro"] + c["cap_moto"] for c in caps.values())
 ocup_total = tot_carros + tot_motos
 
 c1, c2, c3 = st.columns(3)
@@ -70,9 +138,11 @@ c1.metric("Carros", tot_carros)
 c2.metric("Motos", tot_motos)
 c3.metric("Vagas livres", cap_total - ocup_total)
 
+st.caption(f"Capacidade total configurada: **{cap_total}** vagas")
+
 # Ocupação geral do estacionamento (todas as áreas somadas)
 ocup_geral = pct(ocup_total, cap_total)
-st.progress(ocup_geral, text=f"Ocupação geral — {ocup_geral*100:.0f}% ({ocup_total}/{cap_total})")
+st.progress(ocup_geral, text=f"Ocupação geral — {ocup_geral*100:.1f}% ({ocup_total}/{cap_total})")
 
 st.divider()
 
@@ -80,7 +150,8 @@ st.divider()
 # Lista de áreas (local_id 1..13) como cards expansíveis
 # ------------------------------------------------------------------
 for local_id, area in AREAS.items():
-    cap_carro, cap_moto = area["cap_carro"], area["cap_moto"]
+    cap_carro = caps[local_id]["cap_carro"]
+    cap_moto = caps[local_id]["cap_moto"]
     ocup_carro = saldos.get((local_id, TIPO_CARRO), 0)
     ocup_moto = saldos.get((local_id, TIPO_MOTO), 0)
 
