@@ -19,8 +19,9 @@ secrets.toml
 *.sqlite
 *.db
 
-# ---- Editores / SO ----
+# ---- Editores / ferramentas / SO ----
 .vscode/
 .idea/
+.claude/
 .DS_Store
 Thumbs.db
