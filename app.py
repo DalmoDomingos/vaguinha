@@ -9,10 +9,12 @@ Persistência: SQLite em memória por padrão (protótipo). Para usar PostgreSQL
 veja o bloco `get_repo()` abaixo — basta trocar a implementação do Repository.
 """
 
+import os
+
 import streamlit as st
 
 from config import AREAS, TIPO_CARRO, TIPO_MOTO, cor_da_area
-from repository import SQLiteRepository  # , PostgresRepository
+from repository import PostgresRepository, SQLiteRepository
 
 st.set_page_config(page_title="Lotação", page_icon="🅿️", layout="centered")
 
@@ -47,13 +49,26 @@ st.markdown(
 # ------------------------------------------------------------------
 @st.cache_resource
 def get_repo():
-    # --- Protótipo (SQLite em memória) ---
+    """
+    Escolhe a persistência automaticamente, sem senha no código:
+      1. DATABASE_URL em .streamlit/secrets.toml   (recomendado — arquivo NÃO versionado)
+      2. variável de ambiente DATABASE_URL          (ex.: no servidor de deploy)
+      3. fallback: SQLite em memória                (protótipo; zera ao reiniciar)
+    """
+    dsn = None
+    try:
+        dsn = st.secrets.get("DATABASE_URL")  # lê .streamlit/secrets.toml, se existir
+    except Exception:
+        dsn = None
+    dsn = dsn or os.environ.get("DATABASE_URL")
+
+    if dsn:
+        return PostgresRepository(dsn)
     return SQLiteRepository(":memory:")
-    # --- Produção (PostgreSQL) — troque pelo seu DSN e comente a linha acima ---
-    # return PostgresRepository("postgresql://user:senha@host:5432/vaguinha")
 
 
 repo = get_repo()
+usando_pg = isinstance(repo, PostgresRepository)
 
 
 # ------------------------------------------------------------------
@@ -91,7 +106,10 @@ def registrar(tipo_id: int, local_id: int, mov: str, cap: int, ocup: int):
 # Cabeçalho
 # ------------------------------------------------------------------
 st.markdown("<h1 style='text-align:center'>Lotação</h1>", unsafe_allow_html=True)
-st.caption("Corrida da FAB — controle de vagas por área")
+st.caption(
+    "Corrida da FAB — controle de vagas por área · "
+    f"Banco: {'PostgreSQL ✅' if usando_pg else 'SQLite (memória) ⚠️'}"
+)
 
 
 # ------------------------------------------------------------------

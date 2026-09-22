@@ -29,6 +29,23 @@ CREATE INDEX IF NOT EXISTS idx_mov_local_tipo ON movimentacao (local_id, tipo_ve
 INSERT INTO tipo_veiculo (id, nome) VALUES (1, 'Carro'), (2, 'Moto')
 ON CONFLICT (id) DO NOTHING;
 
+-- Seed dos 13 locais (OBRIGATÓRIO: movimentacao.local_id referencia local.id)
+INSERT INTO local (id, nome, cap_carro, cap_moto) VALUES
+    (1,  'Área 1',  150, 50),
+    (2,  'Área 2',  120, 40),
+    (3,  'Área 3',  120, 40),
+    (4,  'Área 4',  100, 30),
+    (5,  'Área 5',  100, 30),
+    (6,  'Área 6',   80, 25),
+    (7,  'Área 7',   80, 25),
+    (8,  'Área 8',   60, 20),
+    (9,  'Área 9',   60, 20),
+    (10, 'Área 10',  50, 15),
+    (11, 'Área 11',  50, 15),
+    (12, 'Área 12',  40, 10),
+    (13, 'Área 13',  40, 10)
+ON CONFLICT (id) DO NOTHING;
+
 -- ============================================================
 -- View de saldo atual (ocupação = entradas - saídas)
 -- ============================================================

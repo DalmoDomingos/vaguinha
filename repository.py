@@ -142,11 +142,15 @@ class PostgresRepository(Repository):
             "INSERT INTO movimentacao (tipo_veiculo_id, local_id, movimentacao, horario) "
             "VALUES (%s, %s, %s, NOW()) RETURNING id"
         )
-        with self.conn.cursor() as cur:
-            cur.execute(sql, (tipo_veiculo_id, local_id, movimentacao))
-            new_id = cur.fetchone()[0]
-        self.conn.commit()
-        return int(new_id)
+        try:
+            with self.conn.cursor() as cur:
+                cur.execute(sql, (tipo_veiculo_id, local_id, movimentacao))
+                new_id = cur.fetchone()[0]
+            self.conn.commit()
+            return int(new_id)
+        except Exception:
+            self.conn.rollback()  # desfaz para não deixar a transação "abortada"
+            raise
 
     def saldo(self, local_id: int, tipo_veiculo_id: int) -> int:
         with self.conn.cursor() as cur:
