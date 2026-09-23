@@ -12,9 +12,12 @@ veja o bloco `get_repo()` abaixo — basta trocar a implementação do Repositor
 import os
 
 import streamlit as st
+from datetime import timezone, timedelta
 
+# Fuso de São Paulo (UTC-3)
+FUSO_SP = timezone(timedelta(hours=-3))
 from config import AREAS, TIPO_CARRO, TIPO_MOTO, cor_da_area
-from repository import PostgresRepository, SQLiteRepository
+from repository import MovimentoInvalido, PostgresRepository, SQLiteRepository
 
 st.set_page_config(page_title="Lotação", page_icon="🅿️", layout="centered")
 
@@ -91,15 +94,20 @@ def pct(ocupados: int, capacidade: int) -> float:
     return max(0.0, min(1.0, ocupados / capacidade))
 
 
-def registrar(tipo_id: int, local_id: int, mov: str, cap: int, ocup: int):
-    """Registra o evento com validações simples de saldo."""
-    if mov == "entrada" and ocup >= cap:
-        st.toast("Área lotada para este tipo de veículo.", icon="⚠️")
-        return
-    if mov == "saida" and ocup <= 0:
-        st.toast("Não há veículos deste tipo para dar saída.", icon="⚠️")
-        return
-    repo.registrar(tipo_id, local_id, mov)
+def registrar(tipo_id: int, local_id: int, mov: str):
+    """
+    Registra o evento. A validação de saldo usa a ocupação ATUAL do banco e a
+    capacidade atual da sessão (não os valores da última renderização, que podem
+    estar defasados quando há mais de um operador).
+    """
+    c = st.session_state.caps[local_id]
+    cap = c["cap_carro"] if tipo_id == TIPO_CARRO else c["cap_moto"]
+    try:
+        repo.registrar(tipo_id, local_id, mov, capacidade=cap)
+    except MovimentoInvalido as e:
+        st.toast(str(e), icon="⚠️")
+    except Exception as e:
+        st.toast(f"Erro ao registrar movimento: {e}", icon="❌")
 
 
 # ------------------------------------------------------------------
@@ -181,7 +189,8 @@ for local_id, area in AREAS.items():
     cor = cor_da_area(local_id)
     titulo = f"{area['nome']}  —  🚗 {ocup_carro}/{cap_carro}   🏍️ {ocup_moto}/{cap_moto}"
 
-    with st.expander(titulo, expanded=(local_id == 1)):
+    # key fixa: sem ela o card fecha a cada clique, pois o título (contagem) muda
+    with st.expander(titulo, expanded=(local_id == 1), key=f"area_{local_id}"):
         st.markdown(
             f"<div style='height:6px;border-radius:3px;background:{cor};margin:-4px 0 10px'></div>",
             unsafe_allow_html=True,
@@ -192,11 +201,11 @@ for local_id, area in AREAS.items():
         m1, m2, _ = st.columns([1, 1, 3])
         m1.button(
             "➕ Entrada", key=f"mot_in_{local_id}",
-            on_click=registrar, args=(TIPO_MOTO, local_id, "entrada", cap_moto, ocup_moto),
+            on_click=registrar, args=(TIPO_MOTO, local_id, "entrada"),
         )
         m2.button(
             "➖ Saída", key=f"mot_out_{local_id}",
-            on_click=registrar, args=(TIPO_MOTO, local_id, "saida", cap_moto, ocup_moto),
+            on_click=registrar, args=(TIPO_MOTO, local_id, "saida"),
         )
 
         # ---- Carros ----
@@ -204,11 +213,11 @@ for local_id, area in AREAS.items():
         c1b, c2b, _ = st.columns([1, 1, 3])
         c1b.button(
             "➕ Entrada", key=f"car_in_{local_id}",
-            on_click=registrar, args=(TIPO_CARRO, local_id, "entrada", cap_carro, ocup_carro),
+            on_click=registrar, args=(TIPO_CARRO, local_id, "entrada"),
         )
         c2b.button(
             "➖ Saída", key=f"car_out_{local_id}",
-            on_click=registrar, args=(TIPO_CARRO, local_id, "saida", cap_carro, ocup_carro),
+            on_click=registrar, args=(TIPO_CARRO, local_id, "saida"),
         )
 
         st.write(f"**Vagas sobrando: {sobrando}**")
@@ -225,14 +234,18 @@ for local_id, area in AREAS.items():
                 st.write("Sem movimentos ainda.")
             else:
                 st.dataframe(
-                    [
-                        {
-                            "horário": h["horario"],
-                            "veículo": "Carro" if h["tipo_veiculo_id"] == TIPO_CARRO else "Moto",
-                            "movimento": h["movimentacao"],
-                        }
-                        for h in hist
-                    ],
-                    hide_index=True,
-                    use_container_width=True,
-                )
+    [
+        {
+            "horário": (
+                h["horario"].replace(tzinfo=FUSO_SP).strftime('%d-%m-%Y %H:%M:%S')
+                if h["horario"].tzinfo is None
+                else h["horario"].astimezone(FUSO_SP).strftime('%d-%m-%Y %H:%M:%S')
+            ),
+            "veículo": "Carro" if h["tipo_veiculo_id"] == TIPO_CARRO else "Moto",
+            "movimento": h["movimentacao"],
+        }
+        for h in hist
+    ],
+    hide_index=True,
+    use_container_width=True,
+)
