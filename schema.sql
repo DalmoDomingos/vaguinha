@@ -47,6 +47,15 @@ INSERT INTO local (id, nome, cap_carro, cap_moto) VALUES
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================
+-- Segurança (Supabase): tabelas do schema "public" ficam expostas na API REST
+-- pública do projeto (chave "anon"). Ativar RLS sem criar políticas bloqueia
+-- esse acesso; o app conecta como dono das tabelas (postgres) e não é afetado.
+-- ============================================================
+ALTER TABLE tipo_veiculo ENABLE ROW LEVEL SECURITY;
+ALTER TABLE local        ENABLE ROW LEVEL SECURITY;
+ALTER TABLE movimentacao ENABLE ROW LEVEL SECURITY;
+
+-- ============================================================
 -- View de saldo atual (ocupação = entradas - saídas)
 -- ============================================================
 CREATE OR REPLACE VIEW vw_ocupacao AS
