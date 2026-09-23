@@ -1,7 +1,7 @@
 # Vaguinha 🅿️
 
 Sistema simples de gestão de **entrada e saída de veículos** em estacionamento,
-organizado por áreas (locais). Feito em Python + Streamlit.
+organizado por **eventos** e suas **áreas**. Feito em Python + Streamlit.
 
 A ocupação de cada área é **derivada do saldo de movimentações**:
 
@@ -11,8 +11,13 @@ ocupados = Σ entradas − Σ saídas   (por área e por tipo de veículo)
 
 ## Funcionalidades
 
-- Visualização das 13 áreas com carros e motos ocupados vs. capacidade.
-- Botões de **entrada** e **saída** por tipo de veículo.
+- **Tela inicial** com a lista de eventos (ocupação de cada um) e o botão
+  **Criar novo evento**. O evento "Corrida da FAB" já vem criado.
+- Em cada evento: **quantas áreas quiser**, com **nome**, **cor** e vagas de
+  **carros** e **motos** — dá para renomear, incluir e excluir áreas e renomear
+  o evento em "⚙️ Editar evento". (Área com veículos estacionados não pode ser
+  excluída: dê saída antes.)
+- Botões de **entrada** e **saída** por tipo de veículo, respeitando a lotação.
 - Barras de ocupação (% carros, % motos, % total) e vagas restantes.
 - Histórico de movimentações por área.
 
@@ -29,8 +34,8 @@ streamlit run app.py
 |------------------|-------------------------------------------------------------|
 | `app.py`         | Interface Streamlit                                         |
 | `repository.py`  | Persistência (SQLite p/ protótipo, PostgreSQL p/ produção) |
-| `config.py`      | Tipos de veículo e capacidades das áreas                   |
-| `schema.sql`     | Schema PostgreSQL                                          |
+| `config.py`      | Tipos de veículo, paleta de cores e evento inicial         |
+| `schema.sql`     | Schema PostgreSQL (cria **e migra** o banco)               |
 
 ## Banco de dados
 
@@ -62,6 +67,9 @@ O rodapé do título mostra qual banco está ativo (`PostgreSQL ✅` / `SQLite �
 ### Usando o Supabase
 
 1. No painel do projeto: **SQL Editor** → cole o conteúdo de `schema.sql` → **Run**.
+   Rode de novo sempre que o `schema.sql` mudar: ele é idempotente e **migra**
+   bancos antigos sem perder dados (ex.: as 13 áreas da versão sem eventos
+   viram o evento "Corrida da FAB", com todo o histórico).
 2. Em **Connect**, copie a URL do **Transaction pooler** (porta `6543`, host
    `aws-0-<região>.pooler.supabase.com`). Evite a "Direct connection": ela usa
    só IPv6 e costuma falhar no Streamlit Cloud e em várias redes.

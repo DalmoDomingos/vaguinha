@@ -1,2 +1,3 @@
 streamlit>=1.64  # st.expander(key=...) mantém o card aberto entre reruns
 psycopg2-binary>=2.9
+pandas>=2.0
