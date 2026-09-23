@@ -45,23 +45,37 @@ st.markdown(
 
 
 # ------------------------------------------------------------------
+# Configuração externa (sem senha no código)
+# ------------------------------------------------------------------
+def ler_config(nome: str):
+    """
+    Lê uma configuração de:
+      1. .streamlit/secrets.toml (ou Secrets do Streamlit Cloud)  — arquivo NÃO versionado
+      2. variável de ambiente                                      (ex.: no servidor de deploy)
+    """
+    valor = None
+    try:
+        valor = st.secrets.get(nome)
+    except Exception:
+        valor = None
+    return valor or os.environ.get(nome)
+
+
+# "teste" no app de homologação (branch develop); ausente/"producao" no app real.
+AMBIENTE = (ler_config("AMBIENTE") or "producao").strip().lower()
+
+
+# ------------------------------------------------------------------
 # Repositório (único, mantido entre reruns do Streamlit)
 # ------------------------------------------------------------------
 @st.cache_resource
 def get_repo():
     """
-    Escolhe a persistência automaticamente, sem senha no código:
-      1. DATABASE_URL em .streamlit/secrets.toml   (recomendado — arquivo NÃO versionado)
-      2. variável de ambiente DATABASE_URL          (ex.: no servidor de deploy)
-      3. fallback: SQLite em memória                (protótipo; zera ao reiniciar)
+    Escolhe a persistência automaticamente:
+      1. DATABASE_URL (secrets ou variável de ambiente) → PostgreSQL
+      2. fallback: SQLite em memória                    (protótipo; zera ao reiniciar)
     """
-    dsn = None
-    try:
-        dsn = st.secrets.get("DATABASE_URL")  # lê .streamlit/secrets.toml, se existir
-    except Exception:
-        dsn = None
-    dsn = dsn or os.environ.get("DATABASE_URL")
-
+    dsn = ler_config("DATABASE_URL")
     if dsn:
         return PostgresRepository(dsn)
     return SQLiteRepository(":memory:")
@@ -110,6 +124,12 @@ def registrar(tipo_id: int, local_id: int, mov: str):
 # ------------------------------------------------------------------
 # Cabeçalho
 # ------------------------------------------------------------------
+if AMBIENTE == "teste":
+    st.warning(
+        "**⚠️ AMBIENTE DE TESTE** — os dados daqui não são reais. "
+        "Não use este app para registrar veículos no evento.",
+    )
+
 st.markdown("<h1 style='text-align:center'>Lotação</h1>", unsafe_allow_html=True)
 st.caption(
     "Corrida da FAB — controle de vagas por área · "
