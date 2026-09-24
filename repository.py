@@ -15,6 +15,7 @@ Toda a regra de ocupação é derivada do saldo:
 from __future__ import annotations
 
 import math
+import queue
 import sqlite3
 import threading
 from abc import ABC, abstractmethod
@@ -22,7 +23,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from config import AREAS_EVENTO_INICIAL, COR_PADRAO, EVENTO_INICIAL, TIPO_CARRO
+from config import AREAS_EVENTO_INICIAL, COR_PADRAO, EVENTO_INICIAL, TIPO_CARRO, TIPO_MOTO
 
 # Horários são gravados e exibidos no fuso de Brasília, qualquer que seja o fuso
 # do servidor (o Supabase e o Streamlit Cloud rodam em UTC).
@@ -119,6 +120,17 @@ SQL_SALDO_UM = (
     f"SELECT COALESCE({SALDO_EXPR}, 0) FROM movimentacao "
     "WHERE local_id = ? AND tipo_veiculo_id = ?"
 )
+SINAL = "CASE WHEN m.movimentacao = 'entrada' THEN 1 ELSE -1 END"
+SQL_PAINEL = f"""
+    SELECT l.id, l.nome, l.cor, l.cap_carro, l.cap_moto,
+           COALESCE(SUM(CASE WHEN m.tipo_veiculo_id = {TIPO_CARRO} THEN {SINAL} END), 0) AS ocup_carro,
+           COALESCE(SUM(CASE WHEN m.tipo_veiculo_id = {TIPO_MOTO}  THEN {SINAL} END), 0) AS ocup_moto
+    FROM local l
+    LEFT JOIN movimentacao m ON m.local_id = l.id
+    WHERE l.evento_id = ?
+    GROUP BY l.id, l.nome, l.cor, l.cap_carro, l.cap_moto, l.ordem
+    ORDER BY l.ordem, l.id
+"""
 SQL_SALDOS_EVENTO = f"""
     SELECT m.local_id, m.tipo_veiculo_id, {SALDO_EXPR} AS ocupados
     FROM movimentacao m JOIN local l ON l.id = m.local_id
@@ -136,14 +148,22 @@ class Repository(ABC):
 
     # ---- infraestrutura (cada banco implementa) ----
     @abstractmethod
-    def _transacao(self):
-        """Context manager: cursor numa transação (commit no sucesso, rollback no erro)."""
+    def _transacao(self, escrita: bool = True):
+        """
+        Context manager que entrega um cursor. Escrita: transação (commit no
+        sucesso, rollback no erro). Leitura: pode dispensar a transação.
+        """
 
-    def _travar_saldo(self, cur, local_id: int, tipo_veiculo_id: int) -> None:
-        """Serializa movimentos do mesmo (área, tipo). Padrão: o lock da transação basta."""
+    def _sql_trava(self) -> str:
+        """
+        SQL (parâmetros: local_id, tipo) que serializa movimentos do mesmo
+        (área, tipo), enviado junto com a leitura do saldo. Padrão: nenhum
+        (o lock da transação basta).
+        """
+        return ""
 
     def _ler(self, consulta):
-        with self._transacao() as cur:
+        with self._transacao(escrita=False) as cur:
             return consulta(cur)
 
     def _sql(self, sql: str) -> str:
@@ -203,6 +223,13 @@ class Repository(ABC):
             (evento_id,),
         )
 
+    def painel_evento(self, evento_id: int) -> List[dict]:
+        """Áreas do evento (na ordem) já com a ocupação: ocup_carro / ocup_moto."""
+        areas = self._todas(SQL_PAINEL, (evento_id,))
+        for a in areas:
+            a["ocup_carro"], a["ocup_moto"] = int(a["ocup_carro"]), int(a["ocup_moto"])
+        return areas
+
     def _inserir_area(self, cur, evento_id: int, a: dict, ordem: int) -> None:
         self._exec(
             cur,
@@ -257,15 +284,19 @@ class Repository(ABC):
         movimento for recusado, levanta MovimentoInvalido.
         """
         with self._transacao() as cur:
-            self._travar_saldo(cur, local_id, tipo_veiculo_id)
-            self._exec(cur, "SELECT cap_carro, cap_moto FROM local WHERE id = ?", (local_id,))
+            # trava + capacidade + saldo numa única ida ao banco
+            trava = self._sql_trava()
+            self._exec(
+                cur,
+                trava + f"SELECT l.cap_carro, l.cap_moto, ({SQL_SALDO_UM}) FROM local l WHERE l.id = ?",
+                ((local_id, tipo_veiculo_id) if trava else ())
+                + (local_id, tipo_veiculo_id, local_id),
+            )
             area = cur.fetchone()
             if area is None:
                 raise OperacaoInvalida("Esta área não existe mais (pode ter sido excluída).")
             capacidade = area[0] if tipo_veiculo_id == TIPO_CARRO else area[1]
-
-            self._exec(cur, SQL_SALDO_UM, (local_id, tipo_veiculo_id))
-            validar_movimento(movimentacao, int(cur.fetchone()[0]), int(capacidade))
+            validar_movimento(movimentacao, int(area[2]), int(capacidade))
 
             self._exec(
                 cur,
@@ -343,7 +374,7 @@ class SQLiteRepository(Repository):
         self.conn.commit()
 
     @contextmanager
-    def _transacao(self):
+    def _transacao(self, escrita: bool = True):
         with self._lock:
             cur = self.conn.cursor()
             try:
@@ -366,19 +397,23 @@ class PostgresRepository(Repository):
         repo = PostgresRepository("postgresql://user:senha@host:5432/vaguinha")
     """
     PH = "%s"
-    # Com o fuso da transação fixado em FUSO (ver _transacao), NOW() grava a hora
-    # de Brasília tanto em coluna TIMESTAMP quanto TIMESTAMPTZ, e as leituras
-    # voltam em Brasília — independente do fuso configurado no Supabase.
+    # Nas escritas o fuso da transação é fixado em FUSO (ver _transacao), então
+    # NOW() grava a hora de Brasília tanto em coluna TIMESTAMP quanto TIMESTAMPTZ,
+    # independente do fuso configurado no Supabase.
     AGORA = "NOW()"
 
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, max_conexoes: int = 15):
         import psycopg2  # import tardio: só exige a lib se realmente usar Postgres
         self._pg = psycopg2
         self._dsn = dsn
-        # Uma conexão compartilhada entre sessões/threads do Streamlit: o lock
-        # impede que a transação de uma sessão se misture com a de outra.
-        self._lock = threading.RLock()
-        self.conn = psycopg2.connect(dsn)
+        # Pool de conexões: vários operadores consultam/registram em paralelo
+        # (até max_conexoes ao mesmo tempo; quem passar disso espera uma livre).
+        # 15 cabe no pooler do Supabase gratuito (use a URL do Transaction pooler).
+        # As conexões são reaproveitadas: abrir uma nova no Supabase custa um
+        # handshake TLS (~100-300 ms). (O pool do psycopg2 fecha a conexão
+        # devolvida quando há mais que `minconn` paradas, por isso não é usado.)
+        self._paradas: "queue.LifoQueue" = queue.LifoQueue()
+        self._livres = threading.BoundedSemaphore(max_conexoes)
         self._migrar_se_preciso()
         self._semear_se_vazio()
 
@@ -400,34 +435,57 @@ class PostgresRepository(Repository):
             with self._transacao() as cur:
                 cur.execute(SCHEMA_SQL.read_text(encoding="utf-8"))
 
+    def _nova_conexao(self):
+        conn = self._pg.connect(self._dsn)
+        conn.autocommit = True  # transações de escrita são abertas explicitamente
+        return conn
+
     @contextmanager
-    def _transacao(self):
-        """
-        Cursor dentro de uma transação curta: commit no sucesso, rollback no erro
-        (inclusive nas leituras, para a conexão nunca ficar "aborted" ou
-        "idle in transaction"). Reabre a conexão se ela tiver caído.
-        """
-        with self._lock:
-            if self.conn.closed:
-                self.conn = self._pg.connect(self._dsn)
+    def _conexao(self):
+        """Empresta uma conexão do pool e a devolve no final (descarta se caiu)."""
+        with self._livres:
             try:
-                with self.conn.cursor() as cur:
-                    cur.execute(f"SET LOCAL TIME ZONE '{FUSO}'")  # vale só nesta transação
-                    yield cur
-                self.conn.commit()
-            except Exception as exc:
-                try:
-                    self.conn.rollback()
-                except Exception:
-                    pass
-                # Conexão perdida (timeout do servidor, restart...): descarta para
-                # a próxima operação abrir uma nova.
-                if isinstance(exc, (self._pg.OperationalError, self._pg.InterfaceError)):
+                conn = self._paradas.get_nowait()
+            except queue.Empty:
+                conn = self._nova_conexao()
+            if conn.closed:  # caiu enquanto estava parada
+                conn = self._nova_conexao()
+            quebrada = False
+            try:
+                yield conn
+            except (self._pg.OperationalError, self._pg.InterfaceError):
+                quebrada = True  # timeout do servidor, restart...: abre outra depois
+                raise
+            finally:
+                if quebrada or conn.closed:
                     try:
-                        self.conn.close()
+                        conn.close()
                     except Exception:
                         pass
+                else:
+                    self._paradas.put(conn)
+
+    @contextmanager
+    def _transacao(self, escrita: bool = True):
+        """
+        Leitura: cada consulta roda sozinha (autocommit), 1 ida ao banco.
+        Escrita: transação curta com o fuso de Brasília (SET LOCAL), commit no
+        sucesso e rollback no erro — a conexão nunca fica "aborted".
+        """
+        with self._conexao() as conn, conn.cursor() as cur:
+            if not escrita:
+                yield cur
+                return
+            cur.execute(f"BEGIN; SET LOCAL TIME ZONE '{FUSO}'")
+            try:
+                yield cur
+            except BaseException:
+                try:
+                    cur.execute("ROLLBACK")
+                except Exception:
+                    pass
                 raise
+            cur.execute("COMMIT")
 
     def _ler(self, consulta):
         """Executa uma leitura; se a conexão tinha caído, tenta mais uma vez."""
@@ -436,7 +494,9 @@ class PostgresRepository(Repository):
         except (self._pg.OperationalError, self._pg.InterfaceError):
             return super()._ler(consulta)
 
-    def _travar_saldo(self, cur, local_id: int, tipo_veiculo_id: int) -> None:
+    def _sql_trava(self) -> str:
         # Serializa movimentos do mesmo (área, tipo) também entre processos,
-        # para duas entradas simultâneas não passarem da capacidade.
-        cur.execute("SELECT pg_advisory_xact_lock(%s, %s)", (local_id, tipo_veiculo_id))
+        # para duas entradas simultâneas não passarem da capacidade. Vai no mesmo
+        # envio da leitura do saldo; como são comandos separados, a leitura só
+        # acontece depois de obter a trava e já enxerga o que os outros gravaram.
+        return "SELECT pg_advisory_xact_lock(?, ?); "
