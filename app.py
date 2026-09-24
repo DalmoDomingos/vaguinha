@@ -16,7 +16,7 @@ quando houver DATABASE_URL (veja `get_repo()`).
 
 import html
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
@@ -103,13 +103,23 @@ def pct(ocupados: int, capacidade: int) -> float:
     return max(0.0, min(1.0, ocupados / capacidade))
 
 
-def fmt_data(valor) -> str:
-    """Data/hora do banco (datetime no Postgres, texto no SQLite) → dd/mm/aaaa hh:mm."""
+# Brasília (UTC-3; sem horário de verão desde 2019)
+FUSO_BR = timezone(timedelta(hours=-3))
+
+
+def fmt_data(valor, segundos: bool = False) -> str:
+    """
+    Data/hora do banco → dd/mm/aaaa hh:mm[:ss] em Brasília.
+    Aceita datetime com fuso (coluna TIMESTAMPTZ), sem fuso (TIMESTAMP, já em
+    Brasília) e texto (SQLite).
+    """
     try:
         dt = valor if isinstance(valor, datetime) else datetime.fromisoformat(str(valor))
-        return dt.strftime("%d/%m/%Y %H:%M")
     except ValueError:
         return str(valor)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(FUSO_BR)
+    return dt.strftime("%d/%m/%Y %H:%M:%S" if segundos else "%d/%m/%Y %H:%M")
 
 
 def num(valor) -> int:
@@ -397,7 +407,7 @@ def tela_evento(evento_id: int):
                     st.dataframe(
                         [
                             {
-                                "horário": fmt_data(h["horario"]),
+                                "horário": fmt_data(h["horario"], segundos=True),
                                 "veículo": "Carro" if h["tipo_veiculo_id"] == TIPO_CARRO else "Moto",
                                 "movimento": h["movimentacao"],
                             }

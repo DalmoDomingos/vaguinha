@@ -1,7 +1,8 @@
 -- ============================================================
 -- Vaguinha - Schema PostgreSQL (Supabase)
 -- ============================================================
--- Pode ser executado mais de uma vez (idempotente):
+-- O app aplica este script sozinho ao conectar num banco vazio ou antigo;
+-- também pode ser executado à mão (SQL Editor), quantas vezes quiser:
 --   * banco vazio            → cria tudo + evento "Corrida da FAB" com 13 áreas;
 --   * banco da versão antiga → (sem eventos) migra as 13 áreas e todo o
 --                              histórico para o evento "Corrida da FAB".
@@ -81,10 +82,6 @@ BEGIN
             FOREIGN KEY (local_id) REFERENCES local(id) ON DELETE CASCADE;
     END IF;
 END $$;
-
--- Horário no fuso de Brasília (o servidor do Supabase roda em UTC)
-ALTER TABLE movimentacao
-    ALTER COLUMN horario SET DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo');
 
 CREATE INDEX IF NOT EXISTS idx_local_evento   ON local (evento_id);
 CREATE INDEX IF NOT EXISTS idx_mov_local_tipo ON movimentacao (local_id, tipo_veiculo_id);

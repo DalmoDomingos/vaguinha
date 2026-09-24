@@ -19,11 +19,15 @@ import sqlite3
 import threading
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from config import AREAS_EVENTO_INICIAL, COR_PADRAO, EVENTO_INICIAL, TIPO_CARRO
 
-FUSO = "America/Sao_Paulo"  # horário gravado no banco (o Supabase roda em UTC)
+# Horários são gravados e exibidos no fuso de Brasília, qualquer que seja o fuso
+# do servidor (o Supabase e o Streamlit Cloud rodam em UTC).
+FUSO = "America/Sao_Paulo"
+SCHEMA_SQL = Path(__file__).with_name("schema.sql")
 
 
 # ------------------------------------------------------------------
@@ -282,10 +286,10 @@ class Repository(ABC):
         return {(r["local_id"], r["tipo_veiculo_id"]): int(r["ocupados"]) for r in rows}
 
     def historico(self, local_id: int, limite: int = 50) -> List[dict]:
-        """Últimos movimentos da área (mais recentes primeiro)."""
+        """Últimos movimentos da área (ordem de registro; mais recentes primeiro)."""
         return self._todas(
             "SELECT id, tipo_veiculo_id, local_id, movimentacao, horario FROM movimentacao "
-            "WHERE local_id = ? ORDER BY horario DESC, id DESC LIMIT ?",
+            "WHERE local_id = ? ORDER BY id DESC LIMIT ?",
             (local_id, limite),
         )
 
@@ -295,7 +299,8 @@ class Repository(ABC):
 # ------------------------------------------------------------------
 class SQLiteRepository(Repository):
     PH = "?"
-    AGORA = "datetime('now', 'localtime')"
+    # UTC-3 fixo: o Brasil não tem horário de verão desde 2019.
+    AGORA = "datetime('now', '-3 hours')"
 
     def __init__(self, db_path: str = ":memory:"):
         # A conexão é compartilhada entre sessões/threads, então todo acesso passa
@@ -361,7 +366,10 @@ class PostgresRepository(Repository):
         repo = PostgresRepository("postgresql://user:senha@host:5432/vaguinha")
     """
     PH = "%s"
-    AGORA = f"(NOW() AT TIME ZONE '{FUSO}')"
+    # Com o fuso da transação fixado em FUSO (ver _transacao), NOW() grava a hora
+    # de Brasília tanto em coluna TIMESTAMP quanto TIMESTAMPTZ, e as leituras
+    # voltam em Brasília — independente do fuso configurado no Supabase.
+    AGORA = "NOW()"
 
     def __init__(self, dsn: str):
         import psycopg2  # import tardio: só exige a lib se realmente usar Postgres
@@ -371,7 +379,26 @@ class PostgresRepository(Repository):
         # impede que a transação de uma sessão se misture com a de outra.
         self._lock = threading.RLock()
         self.conn = psycopg2.connect(dsn)
+        self._migrar_se_preciso()
         self._semear_se_vazio()
+
+    def _migrar_se_preciso(self) -> None:
+        """
+        Aplica o schema.sql se o banco ainda não está no formato com eventos
+        (banco vazio ou versão antiga). O script é idempotente e migra os dados.
+        """
+        def atualizado(cur):
+            cur.execute(
+                "SELECT to_regclass('evento') IS NOT NULL AND EXISTS ("
+                "  SELECT 1 FROM information_schema.columns"
+                "  WHERE table_schema = current_schema()"
+                "    AND table_name = 'local' AND column_name = 'evento_id')"
+            )
+            return cur.fetchone()[0]
+
+        if not self._ler(atualizado):
+            with self._transacao() as cur:
+                cur.execute(SCHEMA_SQL.read_text(encoding="utf-8"))
 
     @contextmanager
     def _transacao(self):
@@ -385,6 +412,7 @@ class PostgresRepository(Repository):
                 self.conn = self._pg.connect(self._dsn)
             try:
                 with self.conn.cursor() as cur:
+                    cur.execute(f"SET LOCAL TIME ZONE '{FUSO}'")  # vale só nesta transação
                     yield cur
                 self.conn.commit()
             except Exception as exc:
