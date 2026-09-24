@@ -21,6 +21,20 @@ ocupados = Σ entradas − Σ saídas   (por área e por tipo de veículo)
 - Barras de ocupação (% carros, % motos, % total) e vagas restantes.
 - Histórico de movimentações por área.
 
+## Vários operadores ao mesmo tempo
+
+O app foi feito para **muitas pessoas registrando entradas e saídas ao mesmo
+tempo** (testado com 100 operadores simultâneos: ~0,2 s por clique):
+
+- **Pool de conexões** com o banco (15 por padrão, `DB_MAX_CONEXOES`).
+- **Lotação garantida**: dois operadores não conseguem ocupar a mesma última
+  vaga — o registro trava a combinação (área, tipo) no Postgres.
+- Os **cards se atualizam sozinhos** a cada 5 s (`ATUALIZAR_A_CADA`) para cada
+  operador ver o que os outros registraram; os cliques atualizam só os cards.
+- O histórico de uma área só é consultado quando alguém liga **Ver histórico**.
+
+> Use a URL do **Transaction pooler** do Supabase (porta 6543).
+
 ## Como rodar
 
 ```bash

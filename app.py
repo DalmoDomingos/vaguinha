@@ -85,7 +85,8 @@ def get_repo():
     """
     dsn = ler_config("DATABASE_URL")
     if dsn:
-        return PostgresRepository(dsn)
+        # DB_MAX_CONEXOES (opcional): conexões simultâneas com o banco (padrão 15)
+        return PostgresRepository(dsn, max_conexoes=int(ler_config("DB_MAX_CONEXOES") or 15))
     return SQLiteRepository(":memory:")
 
 
@@ -310,6 +311,13 @@ def secao_editar_evento(evento: dict, areas: list):
             st.rerun()
 
 
+# Com vários operadores ao mesmo tempo, os cards se atualizam sozinhos para
+# mostrar o que os outros registraram (só os cards, com 1 consulta ao banco).
+# ATUALIZAR_A_CADA (segundos, opcional nos secrets): aumente (ex.: 10) se houver
+# muitos operadores e o servidor ficar lento.
+ATUALIZAR_A_CADA = f"{int(ler_config('ATUALIZAR_A_CADA') or 5)}s"
+
+
 def tela_evento(evento_id: int):
     evento = repo.obter_evento(evento_id)
     st.button("← Eventos", on_click=ir_para)
@@ -320,13 +328,21 @@ def tela_evento(evento_id: int):
     st.markdown(f"<h1 style='text-align:center'>{html.escape(evento['nome'])}</h1>", unsafe_allow_html=True)
     st.caption(f"Controle de vagas por área · Banco: {BANCO}")
 
-    areas = repo.listar_areas(evento_id)
-    secao_editar_evento(evento, areas)
+    secao_editar_evento(evento, repo.listar_areas(evento_id))
+    painel_areas(evento_id)
+
+
+@st.fragment(run_every=ATUALIZAR_A_CADA)
+def painel_areas(evento_id: int):
+    """
+    Resumo + cards das áreas. É um fragmento: os cliques de entrada/saída e a
+    atualização automática refazem só este trecho (1 consulta), não a página.
+    """
+    areas = repo.painel_evento(evento_id)  # áreas + ocupação, numa consulta só
 
     # ---- Resumo geral ----
-    saldos = repo.saldos(evento_id)  # {(local_id, tipo_veiculo_id): ocupados}
-    tot_carros = sum(v for (_, t), v in saldos.items() if t == TIPO_CARRO)
-    tot_motos = sum(v for (_, t), v in saldos.items() if t == TIPO_MOTO)
+    tot_carros = sum(a["ocup_carro"] for a in areas)
+    tot_motos = sum(a["ocup_moto"] for a in areas)
     cap_total = sum(a["cap_carro"] + a["cap_moto"] for a in areas)
     ocup_total = tot_carros + tot_motos
 
@@ -335,7 +351,10 @@ def tela_evento(evento_id: int):
     c2.metric("Motos", tot_motos)
     c3.metric("Vagas livres", cap_total - ocup_total)
 
-    st.caption(f"Capacidade total configurada: **{cap_total}** vagas")
+    st.caption(
+        f"Capacidade total configurada: **{cap_total}** vagas · "
+        f"atualizado às {datetime.now(FUSO_BR):%H:%M:%S}"
+    )
 
     # Ocupação geral do evento (todas as áreas somadas)
     ocup_geral = pct(ocup_total, cap_total)
@@ -347,8 +366,7 @@ def tela_evento(evento_id: int):
     for i, area in enumerate(areas):
         local_id = area["id"]
         cap_carro, cap_moto = area["cap_carro"], area["cap_moto"]
-        ocup_carro = saldos.get((local_id, TIPO_CARRO), 0)
-        ocup_moto = saldos.get((local_id, TIPO_MOTO), 0)
+        ocup_carro, ocup_moto = area["ocup_carro"], area["ocup_moto"]
 
         cap_area = cap_carro + cap_moto
         ocup_area = ocup_carro + ocup_moto
@@ -398,8 +416,8 @@ def tela_evento(evento_id: int):
             st.progress(pct(ocup_moto, cap_moto), text=f"% motos — {pct(ocup_moto, cap_moto)*100:.0f}%")
             st.progress(pct(ocup_area, cap_area), text=f"% total — {pct(ocup_area, cap_area)*100:.0f}%")
 
-            # ---- Histórico recente da área ----
-            with st.popover("Ver histórico"):
+            # ---- Histórico recente da área (só consulta o banco se ligado) ----
+            if st.toggle("Ver histórico", key=f"hist_{local_id}"):
                 hist = repo.historico(local_id=local_id, limite=15)
                 if not hist:
                     st.write("Sem movimentos ainda.")
