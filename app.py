@@ -310,6 +310,33 @@ def secao_editar_evento(evento: dict, areas: list):
             avisar("Alterações salvas.")
             st.rerun()
 
+        secao_zerar_evento(evento, versao)
+
+
+def secao_zerar_evento(evento: dict, versao: int):
+    """Zera entradas/saídas de todas as áreas (mantém áreas e vagas)."""
+    evento_id = evento["id"]
+    st.divider()
+    st.markdown("**🗑️ Zerar entradas e saídas**")
+    st.caption(
+        "Volta a ocupação de **todas as áreas** para zero. As áreas e o número de "
+        "vagas continuam iguais, e os registros antigos ficam arquivados (não são "
+        "apagados). Use antes de começar o evento, para limpar os testes."
+    )
+    confirmacao = st.text_input(
+        f"Para confirmar, digite o nome do evento: **{evento['nome']}**",
+        key=f"zerar_{evento_id}_{versao}",
+    )
+    confirmado = confirmacao.strip().casefold() == evento["nome"].strip().casefold()
+    if st.button(
+        "Zerar ocupação do evento", key=f"btn_zerar_{evento_id}",
+        disabled=not confirmado, icon="⚠️",
+    ):
+        arquivados = repo.zerar_evento(evento_id)
+        st.session_state[f"versao_{evento_id}"] = versao + 1  # limpa a confirmação
+        avisar(f"Evento zerado — {arquivados} registro(s) arquivado(s).", "🗑️")
+        st.rerun()
+
 
 # Com vários operadores ao mesmo tempo, os cards se atualizam sozinhos para
 # mostrar o que os outros registraram (só os cards, com 1 consulta ao banco).

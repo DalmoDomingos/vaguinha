@@ -41,7 +41,8 @@ CREATE TABLE IF NOT EXISTS movimentacao (
     tipo_veiculo_id SMALLINT    NOT NULL REFERENCES tipo_veiculo(id),
     local_id        INTEGER     NOT NULL REFERENCES local(id) ON DELETE CASCADE,
     movimentacao    VARCHAR(10) NOT NULL CHECK (movimentacao IN ('entrada','saida')),
-    horario         TIMESTAMP   NOT NULL DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo')
+    horario         TIMESTAMP   NOT NULL DEFAULT (NOW() AT TIME ZONE 'America/Sao_Paulo'),
+    arquivado_em    TIMESTAMP   -- preenchido ao "zerar" o evento; NULL = conta na ocupação
 );
 
 -- ============================================================
@@ -83,8 +84,15 @@ BEGIN
     END IF;
 END $$;
 
+-- "Zerar evento" arquiva as movimentações em vez de apagar (versões antigas
+-- não tinham a coluna)
+ALTER TABLE movimentacao ADD COLUMN IF NOT EXISTS arquivado_em TIMESTAMP;
+
 CREATE INDEX IF NOT EXISTS idx_local_evento   ON local (evento_id);
 CREATE INDEX IF NOT EXISTS idx_mov_local_tipo ON movimentacao (local_id, tipo_veiculo_id);
+-- saldo lê só as movimentações ativas
+CREATE INDEX IF NOT EXISTS idx_mov_ativas
+    ON movimentacao (local_id, tipo_veiculo_id) WHERE arquivado_em IS NULL;
 
 -- ============================================================
 -- Evento inicial (só se o banco ainda não tiver nenhum evento)
@@ -123,7 +131,8 @@ ALTER TABLE local        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE movimentacao ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================
--- View de saldo atual (ocupação = entradas - saídas) por evento e área.
+-- View de saldo atual (ocupação = entradas - saídas) por evento e área,
+-- só com as movimentações ativas (as arquivadas ao "zerar" não contam).
 -- security_invoker: a view respeita o RLS acima (PostgreSQL 15+).
 -- ============================================================
 DROP VIEW IF EXISTS vw_ocupacao;
@@ -135,4 +144,5 @@ SELECT
     SUM(CASE WHEN m.movimentacao = 'entrada' THEN 1 ELSE -1 END) AS ocupados
 FROM movimentacao m
 JOIN local l ON l.id = m.local_id
+WHERE m.arquivado_em IS NULL
 GROUP BY l.evento_id, m.local_id, m.tipo_veiculo_id;
