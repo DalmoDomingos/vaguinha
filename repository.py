@@ -10,6 +10,9 @@ Modelo:
 
 Toda a regra de ocupação é derivada do saldo:
     ocupados = SUM(entrada) - SUM(saida)   por (local_id, tipo_veiculo_id)
+
+"Zerar" um evento não apaga nada: marca as movimentações com `arquivado_em`,
+e o saldo considera só as ativas (`arquivado_em IS NULL`).
 """
 
 from __future__ import annotations
@@ -100,6 +103,7 @@ def _normalizar_areas(areas: List[dict]) -> List[dict]:
 # SQL comum (escrito com "?"; cada banco troca pelo seu placeholder)
 # ------------------------------------------------------------------
 SALDO_EXPR = "SUM(CASE WHEN movimentacao = 'entrada' THEN 1 ELSE -1 END)"
+ATIVA = "arquivado_em IS NULL"  # movimentação que ainda conta (não foi zerada)
 
 SQL_EVENTOS = f"""
     SELECT e.id, e.nome, e.criado_em,
@@ -109,16 +113,16 @@ SQL_EVENTOS = f"""
     FROM evento e
     LEFT JOIN local l ON l.evento_id = e.id
     LEFT JOIN (SELECT local_id, {SALDO_EXPR} AS ocupados
-               FROM movimentacao GROUP BY local_id) s ON s.local_id = l.id
+               FROM movimentacao WHERE {ATIVA} GROUP BY local_id) s ON s.local_id = l.id
     GROUP BY e.id, e.nome, e.criado_em
     ORDER BY e.criado_em DESC, e.id DESC
 """
 SQL_SALDO_AREA = (
-    f"SELECT COALESCE({SALDO_EXPR}, 0) FROM movimentacao WHERE local_id = ?"
+    f"SELECT COALESCE({SALDO_EXPR}, 0) FROM movimentacao WHERE local_id = ? AND {ATIVA}"
 )
 SQL_SALDO_UM = (
     f"SELECT COALESCE({SALDO_EXPR}, 0) FROM movimentacao "
-    "WHERE local_id = ? AND tipo_veiculo_id = ?"
+    f"WHERE local_id = ? AND tipo_veiculo_id = ? AND {ATIVA}"
 )
 SINAL = "CASE WHEN m.movimentacao = 'entrada' THEN 1 ELSE -1 END"
 SQL_PAINEL = f"""
@@ -126,7 +130,7 @@ SQL_PAINEL = f"""
            COALESCE(SUM(CASE WHEN m.tipo_veiculo_id = {TIPO_CARRO} THEN {SINAL} END), 0) AS ocup_carro,
            COALESCE(SUM(CASE WHEN m.tipo_veiculo_id = {TIPO_MOTO}  THEN {SINAL} END), 0) AS ocup_moto
     FROM local l
-    LEFT JOIN movimentacao m ON m.local_id = l.id
+    LEFT JOIN movimentacao m ON m.local_id = l.id AND m.{ATIVA}
     WHERE l.evento_id = ?
     GROUP BY l.id, l.nome, l.cor, l.cap_carro, l.cap_moto, l.ordem
     ORDER BY l.ordem, l.id
@@ -134,7 +138,7 @@ SQL_PAINEL = f"""
 SQL_SALDOS_EVENTO = f"""
     SELECT m.local_id, m.tipo_veiculo_id, {SALDO_EXPR} AS ocupados
     FROM movimentacao m JOIN local l ON l.id = m.local_id
-    WHERE l.evento_id = ?
+    WHERE l.evento_id = ? AND m.{ATIVA}
     GROUP BY m.local_id, m.tipo_veiculo_id
 """
 
@@ -214,6 +218,21 @@ class Repository(ABC):
         nome = _validar_nome_evento(nome)
         with self._transacao() as cur:
             self._exec(cur, "UPDATE evento SET nome = ? WHERE id = ?", (nome, evento_id))
+
+    def zerar_evento(self, evento_id: int) -> int:
+        """
+        Zera a ocupação de todas as áreas do evento, mantendo áreas e vagas.
+        As movimentações não são apagadas: ficam arquivadas (com a data/hora do
+        reset) e deixam de contar. Retorna quantas foram arquivadas.
+        """
+        with self._transacao() as cur:
+            self._exec(
+                cur,
+                f"UPDATE movimentacao SET arquivado_em = {self.AGORA} "
+                f"WHERE {ATIVA} AND local_id IN (SELECT id FROM local WHERE evento_id = ?)",
+                (evento_id,),
+            )
+            return cur.rowcount
 
     # ---- áreas ----
     def listar_areas(self, evento_id: int) -> List[dict]:
@@ -317,10 +336,10 @@ class Repository(ABC):
         return {(r["local_id"], r["tipo_veiculo_id"]): int(r["ocupados"]) for r in rows}
 
     def historico(self, local_id: int, limite: int = 50) -> List[dict]:
-        """Últimos movimentos da área (ordem de registro; mais recentes primeiro)."""
+        """Últimos movimentos ativos da área (ordem de registro; mais recentes primeiro)."""
         return self._todas(
             "SELECT id, tipo_veiculo_id, local_id, movimentacao, horario FROM movimentacao "
-            "WHERE local_id = ? ORDER BY id DESC LIMIT ?",
+            f"WHERE local_id = ? AND {ATIVA} ORDER BY id DESC LIMIT ?",
             (local_id, limite),
         )
 
@@ -364,13 +383,17 @@ class SQLiteRepository(Repository):
                 tipo_veiculo_id INTEGER NOT NULL,
                 local_id        INTEGER NOT NULL REFERENCES local(id) ON DELETE CASCADE,
                 movimentacao    TEXT    NOT NULL CHECK (movimentacao IN ('entrada','saida')),
-                horario         TEXT    NOT NULL
+                horario         TEXT    NOT NULL,
+                arquivado_em    TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_local_evento ON local (evento_id);
             CREATE INDEX IF NOT EXISTS idx_mov_local_tipo
                 ON movimentacao (local_id, tipo_veiculo_id);
             """
         )
+        colunas = {r[1] for r in self.conn.execute("PRAGMA table_info(movimentacao)")}
+        if "arquivado_em" not in colunas:  # arquivo SQLite de versão anterior
+            self.conn.execute("ALTER TABLE movimentacao ADD COLUMN arquivado_em TEXT")
         self.conn.commit()
 
     @contextmanager
@@ -419,15 +442,17 @@ class PostgresRepository(Repository):
 
     def _migrar_se_preciso(self) -> None:
         """
-        Aplica o schema.sql se o banco ainda não está no formato com eventos
-        (banco vazio ou versão antiga). O script é idempotente e migra os dados.
+        Aplica o schema.sql se o banco não está na versão atual (vazio, sem
+        eventos ou sem arquivamento). O script é idempotente e migra os dados.
         """
         def atualizado(cur):
             cur.execute(
-                "SELECT to_regclass('evento') IS NOT NULL AND EXISTS ("
-                "  SELECT 1 FROM information_schema.columns"
-                "  WHERE table_schema = current_schema()"
-                "    AND table_name = 'local' AND column_name = 'evento_id')"
+                "SELECT to_regclass('evento') IS NOT NULL AND ("
+                "  SELECT COUNT(*) FROM information_schema.columns"
+                "  WHERE table_schema = current_schema() AND ("
+                "    (table_name = 'local' AND column_name = 'evento_id') OR"
+                "    (table_name = 'movimentacao' AND column_name = 'arquivado_em'))"
+                ") = 2"
             )
             return cur.fetchone()[0]
 

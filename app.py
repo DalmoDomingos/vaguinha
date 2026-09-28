@@ -16,9 +16,9 @@ quando houver DATABASE_URL (veja `get_repo()`).
 
 import html
 import os
+import uuid
 from datetime import datetime, timedelta, timezone
 
-import pandas as pd
 import streamlit as st
 
 from config import COR_PADRAO, PALETA, TIPO_CARRO, TIPO_MOTO, emoji_da_cor, rotulo_da_cor
@@ -45,6 +45,25 @@ st.markdown(
       [data-testid="stExpander"] summary p {
           font-size: 1.25rem;
           font-weight: 600;
+      }
+
+      /* Celular: o Streamlit empilha colunas em telas estreitas. O resumo e os
+         botões de entrada/saída ficam lado a lado, para o operador achar os
+         botões sem rolar e acertar o dedo com facilidade. */
+      @media (max-width: 640px) {
+          .st-key-resumo [data-testid="stHorizontalBlock"],
+          [class*="st-key-mov_"] [data-testid="stHorizontalBlock"] {
+              flex-wrap: nowrap !important;
+              gap: 0.5rem !important;
+          }
+          .st-key-resumo [data-testid="stColumn"],
+          [class*="st-key-mov_"] [data-testid="stColumn"] {
+              min-width: 0 !important;
+              width: auto !important;
+              flex: 1 1 0 !important;
+          }
+          .st-key-resumo [data-testid="stMetricValue"] { font-size: 1.5rem; }
+          .st-key-resumo [data-testid="stMetricLabel"] p { font-size: 0.85rem; }
       }
     </style>
     """,
@@ -124,7 +143,7 @@ def fmt_data(valor, segundos: bool = False) -> str:
 
 
 def num(valor) -> int:
-    """Número de uma célula da tabela (vazia/NaN conta como 0)."""
+    """Número digitado (vazio/NaN conta como 0)."""
     return 0 if valor is None or valor != valor else int(valor)
 
 
@@ -148,72 +167,92 @@ def registrar(tipo_id: int, local_id: int, mov: str):
     ATUAIS do banco (não os valores da última renderização, que podem estar
     defasados quando há mais de um operador).
     """
+    # O aviso é mostrado pelo próprio painel (exibir elementos dentro de um
+    # callback de fragmento não é suportado pelo Streamlit).
     try:
         repo.registrar(tipo_id, local_id, mov)
     except OperacaoInvalida as e:
-        st.toast(str(e), icon="⚠️")
+        st.session_state["aviso_painel"] = (str(e), "⚠️")
     except Exception as e:
-        st.toast(f"Erro ao registrar movimento: {e}", icon="❌")
+        st.session_state["aviso_painel"] = (f"Erro ao registrar movimento: {e}", "❌")
+
+
+def _linha(area: dict) -> dict:
+    """Uma linha do editor de áreas (uid identifica os campos dela na tela)."""
+    return {
+        "uid": uuid.uuid4().hex[:8],
+        "id": area.get("id"),
+        "nome": area["nome"],
+        "cor": rotulo_da_cor(area["cor"]),
+        "cap_carro": int(area["cap_carro"]),
+        "cap_moto": int(area["cap_moto"]),
+    }
+
+
+def _adicionar_linha(chave_linhas: str):
+    linhas = st.session_state[chave_linhas]
+    linhas.append(_linha({"nome": f"Área {len(linhas) + 1}", "cor": COR_PADRAO,
+                          "cap_carro": 0, "cap_moto": 0}))
+
+
+def _remover_linha(chave_linhas: str, uid: str):
+    st.session_state[chave_linhas] = [l for l in st.session_state[chave_linhas] if l["uid"] != uid]
 
 
 def editor_areas(areas: list, key: str) -> list:
     """
-    Tabela editável de áreas (nome, cor, vagas), com linhas para adicionar e
-    excluir. Devolve a lista no formato do repositório (com o id das existentes).
+    Lista editável de áreas — nome, cor e vagas de carros/motos — com botões
+    para adicionar (➕) e excluir (🗑️). Devolve a lista no formato do
+    repositório (com o id das áreas que já existem).
+
+    Usa campos comuns em vez de st.data_editor: a tabela do Streamlit (1.64)
+    descarta o valor digitado quando a célula é aberta com duplo clique depois
+    da primeira edição, e é difícil de usar no celular.
     """
-    df = pd.DataFrame(
-        [
-            {
-                "id": a.get("id"),
-                "Área": a["nome"],
-                "Cor": rotulo_da_cor(a["cor"]),
-                "Carros": int(a["cap_carro"]),
-                "Motos": int(a["cap_moto"]),
-            }
-            for a in areas
-        ],
-        columns=["id", "Área", "Cor", "Carros", "Motos"],
-    )
+    chave_linhas = f"{key}_linhas"
+    if chave_linhas not in st.session_state:
+        st.session_state[chave_linhas] = [_linha(a) for a in areas]
+    linhas = st.session_state[chave_linhas]
+
     # cores fora da paleta (ex.: definidas direto no banco) continuam selecionáveis
-    opcoes_cor = list(PALETA) + sorted({c for c in df["Cor"] if c not in PALETA})
+    opcoes_cor = list(PALETA) + sorted({l["cor"] for l in linhas} - set(PALETA))
 
-    st.caption(
-        "✏️ Clique numa célula para editar · ➕ adicione áreas na última linha · "
-        "🗑️ para excluir, marque a linha à esquerda e clique na lixeira."
-    )
-    editado = st.data_editor(
-        df,
-        key=key,
-        num_rows="dynamic",
-        hide_index=True,
-        width="stretch",
-        column_order=["Área", "Cor", "Carros", "Motos"],
-        column_config={
-            "Área": st.column_config.TextColumn(required=True, default="Nova área", max_chars=60),
-            "Cor": st.column_config.SelectboxColumn(
-                options=opcoes_cor, required=True, default=rotulo_da_cor(COR_PADRAO),
-            ),
-            "Carros": st.column_config.NumberColumn(
-                min_value=0, step=1, format="%d", default=0, required=True,
-            ),
-            "Motos": st.column_config.NumberColumn(
-                min_value=0, step=1, format="%d", default=0, required=True,
-            ),
-        },
-    )
+    for l in linhas:
+        uid = l["uid"]
+        with st.container(border=True):
+            c_nome, c_cor, c_car, c_mot, c_del = st.columns(
+                [3, 2.2, 1.5, 1.5, 0.8], vertical_alignment="bottom",
+            )
+            l["nome"] = c_nome.text_input(
+                "Nome da área", value=l["nome"], max_chars=60, key=f"{key}_{uid}_nome",
+                placeholder="Ex.: Portão Norte",
+            )
+            l["cor"] = c_cor.selectbox(
+                "Cor", opcoes_cor, index=opcoes_cor.index(l["cor"]), key=f"{key}_{uid}_cor",
+            )
+            l["cap_carro"] = c_car.number_input(
+                "🚗 Carros", min_value=0, step=1, value=l["cap_carro"], key=f"{key}_{uid}_carros",
+            )
+            l["cap_moto"] = c_mot.number_input(
+                "🏍️ Motos", min_value=0, step=1, value=l["cap_moto"], key=f"{key}_{uid}_motos",
+            )
+            c_del.button(
+                "🗑️", key=f"{key}_{uid}_excluir", help="Excluir esta área", width="stretch",
+                on_click=_remover_linha, args=(chave_linhas, uid),
+            )
 
-    def texto(v):
-        return v if isinstance(v, str) else ""
+    st.button("➕ Adicionar área", key=f"{key}_adicionar",
+              on_click=_adicionar_linha, args=(chave_linhas,))
 
     return [
         {
-            "id": r["id"],
-            "nome": texto(r["Área"]),
-            "cor": PALETA.get(texto(r["Cor"]), texto(r["Cor"])) or COR_PADRAO,
-            "cap_carro": r["Carros"],
-            "cap_moto": r["Motos"],
+            "id": l["id"],
+            "nome": l["nome"],
+            "cor": PALETA.get(l["cor"], l["cor"]) or COR_PADRAO,
+            "cap_carro": l["cap_carro"],
+            "cap_moto": l["cap_moto"],
         }
-        for r in editado.to_dict("records")
+        for l in linhas
     ]
 
 
@@ -277,6 +316,7 @@ def tela_novo_evento():
         except OperacaoInvalida as e:
             st.error(str(e))
             return
+        st.session_state.pop("novo_areas_linhas", None)  # descarta o rascunho
         avisar(f"Evento “{nome.strip()}” criado!")
         ir_para(evento=evento_id)
         st.rerun()
@@ -310,6 +350,33 @@ def secao_editar_evento(evento: dict, areas: list):
             avisar("Alterações salvas.")
             st.rerun()
 
+        secao_zerar_evento(evento, versao)
+
+
+def secao_zerar_evento(evento: dict, versao: int):
+    """Zera entradas/saídas de todas as áreas (mantém áreas e vagas)."""
+    evento_id = evento["id"]
+    st.divider()
+    st.markdown("**🗑️ Zerar entradas e saídas**")
+    st.caption(
+        "Volta a ocupação de **todas as áreas** para zero. As áreas e o número de "
+        "vagas continuam iguais, e os registros antigos ficam arquivados (não são "
+        "apagados). Use antes de começar o evento, para limpar os testes."
+    )
+    confirmacao = st.text_input(
+        f"Para confirmar, digite o nome do evento: **{evento['nome']}**",
+        key=f"zerar_{evento_id}_{versao}",
+    )
+    confirmado = confirmacao.strip().casefold() == evento["nome"].strip().casefold()
+    if st.button(
+        "Zerar ocupação do evento", key=f"btn_zerar_{evento_id}",
+        disabled=not confirmado, icon="⚠️",
+    ):
+        arquivados = repo.zerar_evento(evento_id)
+        st.session_state[f"versao_{evento_id}"] = versao + 1  # limpa a confirmação
+        avisar(f"Evento zerado — {arquivados} registro(s) arquivado(s).", "🗑️")
+        st.rerun()
+
 
 # Com vários operadores ao mesmo tempo, os cards se atualizam sozinhos para
 # mostrar o que os outros registraram (só os cards, com 1 consulta ao banco).
@@ -328,8 +395,10 @@ def tela_evento(evento_id: int):
     st.markdown(f"<h1 style='text-align:center'>{html.escape(evento['nome'])}</h1>", unsafe_allow_html=True)
     st.caption(f"Controle de vagas por área · Banco: {BANCO}")
 
-    secao_editar_evento(evento, repo.listar_areas(evento_id))
     painel_areas(evento_id)
+    # no fim: operadores quase não usam, e o "zerar" fica longe de toques acidentais
+    st.divider()
+    secao_editar_evento(evento, repo.listar_areas(evento_id))
 
 
 @st.fragment(run_every=ATUALIZAR_A_CADA)
@@ -338,6 +407,10 @@ def painel_areas(evento_id: int):
     Resumo + cards das áreas. É um fragmento: os cliques de entrada/saída e a
     atualização automática refazem só este trecho (1 consulta), não a página.
     """
+    if "aviso_painel" in st.session_state:
+        msg, icon = st.session_state.pop("aviso_painel")
+        st.toast(msg, icon=icon)
+
     areas = repo.painel_evento(evento_id)  # áreas + ocupação, numa consulta só
 
     # ---- Resumo geral ----
@@ -346,10 +419,11 @@ def painel_areas(evento_id: int):
     cap_total = sum(a["cap_carro"] + a["cap_moto"] for a in areas)
     ocup_total = tot_carros + tot_motos
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Carros", tot_carros)
-    c2.metric("Motos", tot_motos)
-    c3.metric("Vagas livres", cap_total - ocup_total)
+    with st.container(key="resumo"):
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Carros", tot_carros)
+        c2.metric("Motos", tot_motos)
+        c3.metric("Vagas livres", cap_total - ocup_total)
 
     st.caption(
         f"Capacidade total configurada: **{cap_total}** vagas · "
@@ -387,27 +461,29 @@ def painel_areas(evento_id: int):
 
             # ---- Motos ----
             st.markdown(f"**🏍️ {ocup_moto:02d}/{cap_moto} motos**")
-            m1, m2, _ = st.columns([1, 1, 3])
-            m1.button(
-                "➕ Entrada", key=f"mot_in_{local_id}",
-                on_click=registrar, args=(TIPO_MOTO, local_id, "entrada"),
-            )
-            m2.button(
-                "➖ Saída", key=f"mot_out_{local_id}",
-                on_click=registrar, args=(TIPO_MOTO, local_id, "saida"),
-            )
+            with st.container(key=f"mov_moto_{local_id}"):
+                m1, m2 = st.columns(2)
+                m1.button(
+                    "➕ Entrada", key=f"mot_in_{local_id}", width="stretch",
+                    on_click=registrar, args=(TIPO_MOTO, local_id, "entrada"),
+                )
+                m2.button(
+                    "➖ Saída", key=f"mot_out_{local_id}", width="stretch",
+                    on_click=registrar, args=(TIPO_MOTO, local_id, "saida"),
+                )
 
             # ---- Carros ----
             st.markdown(f"**🚗 {ocup_carro:02d}/{cap_carro} carros**")
-            c1b, c2b, _ = st.columns([1, 1, 3])
-            c1b.button(
-                "➕ Entrada", key=f"car_in_{local_id}",
-                on_click=registrar, args=(TIPO_CARRO, local_id, "entrada"),
-            )
-            c2b.button(
-                "➖ Saída", key=f"car_out_{local_id}",
-                on_click=registrar, args=(TIPO_CARRO, local_id, "saida"),
-            )
+            with st.container(key=f"mov_carro_{local_id}"):
+                c1b, c2b = st.columns(2)
+                c1b.button(
+                    "➕ Entrada", key=f"car_in_{local_id}", width="stretch",
+                    on_click=registrar, args=(TIPO_CARRO, local_id, "entrada"),
+                )
+                c2b.button(
+                    "➖ Saída", key=f"car_out_{local_id}", width="stretch",
+                    on_click=registrar, args=(TIPO_CARRO, local_id, "saida"),
+                )
 
             st.write(f"**Vagas sobrando: {sobrando}**")
 
@@ -427,7 +503,7 @@ def painel_areas(evento_id: int):
                             {
                                 "horário": fmt_data(h["horario"], segundos=True),
                                 "veículo": "Carro" if h["tipo_veiculo_id"] == TIPO_CARRO else "Moto",
-                                "movimento": h["movimentacao"],
+                                "movimento": "Entrada" if h["movimentacao"] == "entrada" else "Saída",
                             }
                             for h in hist
                         ],
