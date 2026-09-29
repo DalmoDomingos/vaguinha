@@ -16,6 +16,7 @@ quando houver DATABASE_URL (veja `get_repo()`).
 
 import html
 import os
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -46,6 +47,30 @@ st.markdown(
           font-size: 1.25rem;
           font-weight: 600;
       }
+
+      /* Trava dos botões de entrada/saída (ver TRAVA_JS): enquanto um registro
+         é processado, os botões não aceitam toque e o tocado mostra um círculo. */
+      body.vg-travado [class*="st-key-mov_"] button {
+          pointer-events: none;
+          opacity: 0.6;
+      }
+      [class*="st-key-mov_"] button.vg-carregando {
+          position: relative;
+          opacity: 1;
+      }
+      [class*="st-key-mov_"] button.vg-carregando > * { visibility: hidden; }
+      [class*="st-key-mov_"] button.vg-carregando::after {
+          content: "";
+          position: absolute;
+          top: 50%; left: 50%;
+          width: 1.1rem; height: 1.1rem;
+          margin: -0.55rem 0 0 -0.55rem;
+          border: 2.5px solid currentColor;
+          border-top-color: transparent;
+          border-radius: 50%;
+          animation: vg-gira 0.6s linear infinite;
+      }
+      @keyframes vg-gira { to { transform: rotate(360deg); } }
 
       /* Celular: o Streamlit empilha colunas em telas estreitas. O resumo e os
          botões de entrada/saída ficam lado a lado, para o operador achar os
@@ -161,20 +186,48 @@ def ir_para(evento=None, tela=None):
         st.query_params["tela"] = tela
 
 
-def registrar(tipo_id: int, local_id: int, mov: str):
+# Pop-up de confirmação: some rápido para não atrapalhar o próximo registro.
+AVISO_OK_SEGUNDOS = 2
+# Toque no MESMO botão chegando logo depois do anterior ter sido processado é
+# tratado como toque repetido (internet lenta: o operador tocou de novo achando
+# que não tinha ido): esses chegam colados, a menos de 0,1 s. Um segundo veículo
+# de verdade leva mais (a trava na tela só solta depois da resposta).
+TOQUE_REPETIDO_SEGUNDOS = 0.3
+
+
+def registrar(tipo_id: int, local_id: int, mov: str, nome_area: str):
     """
     Registra o evento. A validação de saldo usa a capacidade e a ocupação
     ATUAIS do banco (não os valores da última renderização, que podem estar
     defasados quando há mais de um operador).
     """
-    # O aviso é mostrado pelo próprio painel (exibir elementos dentro de um
-    # callback de fragmento não é suportado pelo Streamlit).
+    # Os avisos são mostrados pelo próprio painel (exibir elementos dentro de
+    # um callback de fragmento não é suportado pelo Streamlit) e só aparecem
+    # para quem registrou: cada operador tem a sua sessão.
+    chave = (tipo_id, local_id, mov)
+    anterior = st.session_state.get("ultimo_registro")  # (chave, quando terminou)
+    if anterior and anterior[0] == chave and time.monotonic() - anterior[1] < TOQUE_REPETIDO_SEGUNDOS:
+        st.session_state["aviso_painel"] = (
+            "Toque repetido ignorado. Se era outro veículo, toque de novo.", "⏳", "short")
+        return
     try:
-        repo.registrar(tipo_id, local_id, mov)
+        r = repo.registrar(tipo_id, local_id, mov)
     except OperacaoInvalida as e:
-        st.session_state["aviso_painel"] = (str(e), "⚠️")
+        st.session_state["aviso_painel"] = (str(e), "⚠️", "short")
+        return
     except Exception as e:
-        st.session_state["aviso_painel"] = (f"Erro ao registrar movimento: {e}", "❌")
+        st.session_state["aviso_painel"] = (f"Erro ao registrar movimento: {e}", "❌", "long")
+        return
+    finally:
+        st.session_state["ultimo_registro"] = (chave, time.monotonic())
+
+    veiculo = "🚗 Carro" if tipo_id == TIPO_CARRO else "🏍️ Moto"
+    verbo = "entrou" if mov == "entrada" else "saiu"
+    st.session_state["aviso_painel"] = (
+        f"{veiculo} **{verbo}** — {nome_area} · {r['ocupados']}/{r['capacidade']}",
+        "✅" if mov == "entrada" else "↩️",
+        AVISO_OK_SEGUNDOS,
+    )
 
 
 def _linha(area: dict) -> dict:
@@ -378,6 +431,63 @@ def secao_zerar_evento(evento: dict, versao: int):
         st.rerun()
 
 
+# Trava dos botões no navegador: ao tocar em Entrada/Saída, todos os botões de
+# movimento ficam bloqueados (e o tocado mostra um círculo girando) até o
+# Streamlit terminar de processar o registro — assim um segundo toque, com a
+# internet lenta, não vira um segundo veículo. Destrava sozinho após 12 s.
+TRAVA_JS = """
+<script>
+(() => {
+  if (window.__vgTrava) return;
+  window.__vgTrava = true;
+  const BOTOES = '[class*="st-key-mov_"] button';
+  const MINIMO_MS = 250, MAXIMO_MS = 12000;
+  let travadoEm = 0, viuRodando = false, observador = null;
+
+  const estado = () => {
+    const app = document.querySelector('[data-testid="stApp"]');
+    return app && app.getAttribute("data-test-script-state");
+  };
+  const destravar = () => {
+    travadoEm = 0; viuRodando = false;
+    document.body.classList.remove("vg-travado");
+    document.querySelectorAll(".vg-carregando").forEach(b => b.classList.remove("vg-carregando"));
+  };
+  // Marca se o Streamlit rodou depois do toque (pega execuções curtíssimas).
+  const observar = () => {
+    const app = document.querySelector('[data-testid="stApp"]');
+    if (!app || observador) return;
+    observador = new MutationObserver(() => {
+      if (travadoEm && estado() === "running") viuRodando = true;
+    });
+    observador.observe(app, {attributes: true, attributeFilter: ["data-test-script-state"]});
+  };
+  // Destrava quando o Streamlit parar de rodar depois do toque. Se o toque
+  // aconteceu durante uma atualização automática (já "running"), essa execução
+  // é emendada com a do registro e conta também.
+  setInterval(() => {
+    if (!travadoEm) return;
+    const passou = Date.now() - travadoEm;
+    if (estado() === "running") { viuRodando = true; }
+    else if (viuRodando && passou >= MINIMO_MS) { destravar(); }
+    if (travadoEm && passou >= MAXIMO_MS) destravar();
+  }, 100);
+
+  document.addEventListener("click", (ev) => {
+    const botao = ev.target.closest && ev.target.closest(BOTOES);
+    if (!botao) return;
+    if (travadoEm) { ev.preventDefault(); ev.stopImmediatePropagation(); return; }
+    observar();
+    travadoEm = Date.now();
+    viuRodando = estado() === "running";
+    document.body.classList.add("vg-travado");
+    botao.classList.add("vg-carregando");
+  }, true);
+})();
+</script>
+"""
+
+
 # Com vários operadores ao mesmo tempo, os cards se atualizam sozinhos para
 # mostrar o que os outros registraram (só os cards, com 1 consulta ao banco).
 # ATUALIZAR_A_CADA (segundos, opcional nos secrets): aumente (ex.: 10) se houver
@@ -395,6 +505,7 @@ def tela_evento(evento_id: int):
     st.markdown(f"<h1 style='text-align:center'>{html.escape(evento['nome'])}</h1>", unsafe_allow_html=True)
     st.caption(f"Controle de vagas por área · Banco: {BANCO}")
 
+    st.html(TRAVA_JS, unsafe_allow_javascript=True)
     painel_areas(evento_id)
     # no fim: operadores quase não usam, e o "zerar" fica longe de toques acidentais
     st.divider()
@@ -408,8 +519,15 @@ def painel_areas(evento_id: int):
     atualização automática refazem só este trecho (1 consulta), não a página.
     """
     if "aviso_painel" in st.session_state:
-        msg, icon = st.session_state.pop("aviso_painel")
-        st.toast(msg, icon=icon)
+        msg, icon, duracao = st.session_state.pop("aviso_painel")
+        # O Streamlit identifica cada pop-up pela posição em que foi criado: no
+        # mesmo lugar, o 2º pop-up (dois veículos seguidos) era tratado como o 1º,
+        # ainda visível, e não aparecia. Marcadores vazios antes dele mudam a
+        # posição a cada aviso (até 5 avisos seguidos na tela, cada um no seu lugar).
+        n = st.session_state["avisos_mostrados"] = st.session_state.get("avisos_mostrados", 0) + 1
+        for _ in range(n % 5):
+            st.empty()
+        st.toast(msg, icon=icon, duration=duracao)
 
     areas = repo.painel_evento(evento_id)  # áreas + ocupação, numa consulta só
 
@@ -465,11 +583,11 @@ def painel_areas(evento_id: int):
                 m1, m2 = st.columns(2)
                 m1.button(
                     "➕ Entrada", key=f"mot_in_{local_id}", width="stretch",
-                    on_click=registrar, args=(TIPO_MOTO, local_id, "entrada"),
+                    on_click=registrar, args=(TIPO_MOTO, local_id, "entrada", area["nome"]),
                 )
                 m2.button(
                     "➖ Saída", key=f"mot_out_{local_id}", width="stretch",
-                    on_click=registrar, args=(TIPO_MOTO, local_id, "saida"),
+                    on_click=registrar, args=(TIPO_MOTO, local_id, "saida", area["nome"]),
                 )
 
             # ---- Carros ----
@@ -478,11 +596,11 @@ def painel_areas(evento_id: int):
                 c1b, c2b = st.columns(2)
                 c1b.button(
                     "➕ Entrada", key=f"car_in_{local_id}", width="stretch",
-                    on_click=registrar, args=(TIPO_CARRO, local_id, "entrada"),
+                    on_click=registrar, args=(TIPO_CARRO, local_id, "entrada", area["nome"]),
                 )
                 c2b.button(
                     "➖ Saída", key=f"car_out_{local_id}", width="stretch",
-                    on_click=registrar, args=(TIPO_CARRO, local_id, "saida"),
+                    on_click=registrar, args=(TIPO_CARRO, local_id, "saida", area["nome"]),
                 )
 
             st.write(f"**Vagas sobrando: {sobrando}**")

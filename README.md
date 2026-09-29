@@ -32,6 +32,11 @@ tempo** (testado com 100 operadores simultâneos: ~0,2 s por clique):
 - Os **cards se atualizam sozinhos** a cada 5 s (`ATUALIZAR_A_CADA`) para cada
   operador ver o que os outros registraram; os cliques atualizam só os cards.
 - O histórico de uma área só é consultado quando alguém liga **Ver histórico**.
+- **Trava contra toque duplo**: ao tocar em Entrada/Saída, os botões ficam
+  travados (o tocado mostra um círculo girando) até o registro terminar, e um
+  pop-up rápido confirma — só para quem registrou (ex.: "✅ 🚗 Carro entrou —
+  Área 1 · 5/150"). Se ainda assim chegar um toque repetido colado no anterior
+  (internet lenta), o servidor ignora e avisa.
 
 > Use a URL do **Transaction pooler** do Supabase (porta 6543).
 
