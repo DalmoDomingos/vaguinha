@@ -296,11 +296,12 @@ class Repository(ABC):
                     )
 
     # ---- movimentos ----
-    def registrar(self, tipo_veiculo_id: int, local_id: int, movimentacao: str) -> int:
+    def registrar(self, tipo_veiculo_id: int, local_id: int, movimentacao: str) -> Dict[str, int]:
         """
-        Insere um evento de 'entrada' ou 'saida' com horário = agora. Retorna o id.
+        Insere um evento de 'entrada' ou 'saida' com horário = agora.
         A capacidade e o saldo são lidos na mesma transação do insert; se o
         movimento for recusado, levanta MovimentoInvalido.
+        Retorna {"id", "ocupados", "capacidade"} — ocupados já com este movimento.
         """
         with self._transacao() as cur:
             # trava + capacidade + saldo numa única ida ao banco
@@ -315,7 +316,8 @@ class Repository(ABC):
             if area is None:
                 raise OperacaoInvalida("Esta área não existe mais (pode ter sido excluída).")
             capacidade = area[0] if tipo_veiculo_id == TIPO_CARRO else area[1]
-            validar_movimento(movimentacao, int(area[2]), int(capacidade))
+            ocupados = int(area[2])
+            validar_movimento(movimentacao, ocupados, int(capacidade))
 
             self._exec(
                 cur,
@@ -323,7 +325,12 @@ class Repository(ABC):
                 f"VALUES (?, ?, ?, {self.AGORA}) RETURNING id",
                 (tipo_veiculo_id, local_id, movimentacao),
             )
-            return int(cur.fetchone()[0])
+            novo_id = int(cur.fetchone()[0])
+        return {
+            "id": novo_id,
+            "ocupados": ocupados + (1 if movimentacao == "entrada" else -1),
+            "capacidade": int(capacidade),
+        }
 
     def saldo(self, local_id: int, tipo_veiculo_id: int) -> int:
         """Ocupação atual (entradas - saídas) de um tipo em uma área."""
