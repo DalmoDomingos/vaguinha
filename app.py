@@ -50,7 +50,11 @@ def _recarregar_modulos_alterados() -> str:
             modulo = importlib.import_module(nome)
         modulo._VG_VERSAO = digital
         if nome == "repository":
-            versao_banco = digital
+            # inclui QUAL cópia do módulo está carregada: o Streamlit também o
+            # recarrega quando só o config.py muda, e o repositório do cache
+            # (feito com a cópia antiga) levantaria erros que o app não
+            # reconhece (ex.: "Não há veículos..." virava "Erro ao registrar")
+            versao_banco = f"{digital}-{id(modulo)}"
     return versao_banco
 
 
@@ -623,7 +627,10 @@ CSS_LOTADA = "--cor:#F2B705;--texto-cor:#2F3438;"
 # seguidos o operador ficava sem a confirmação do segundo. Este é substituído
 # na hora por cada aviso novo e fica por cima da tela (não empurra os botões).
 CSS_AVISO = """
-  .st-key-aviso { position: absolute; height: 0; overflow: visible; }
+  /* fora do fluxo da página (inclusive a caixa que o Streamlit põe em volta),
+     para o pop-up não empurrar os botões quando aparece */
+  .st-key-aviso, [data-testid="stLayoutWrapper"]:has(> .st-key-aviso) {
+      position: absolute !important; height: 0 !important; margin: 0 !important; overflow: visible; }
   .vg-aviso {
       position: fixed; z-index: 1000; left: 50%; top: 4.2rem;
       transform: translateX(-50%);
@@ -655,12 +662,15 @@ def mostrar_aviso_painel():
     with st.container(key="aviso"):
         ativo = st.session_state.get("aviso_ativo")
         if ativo and agora < ativo[4]:
-            n, msg, icon, segundos, _ = ativo
+            n, msg, icon, segundos, fim = ativo
+            # atualização automática no meio: a animação continua de onde estava
+            decorrido = max(0.0, segundos - (fim - agora))
             # texto vem do banco (nome da área): escapa e só então aplica o **negrito**
             partes = html.escape(msg).split("**")
             texto = "".join(f"<b>{p}</b>" if i % 2 else p for i, p in enumerate(partes))
             st.html(f'<div class="vg-aviso" role="status" data-n="{n}" '
-                    f'style="--duracao:{segundos}s">{icon}&nbsp; {texto}</div>')
+                    f'style="--duracao:{segundos}s;animation-delay:-{decorrido:.1f}s">'
+                    f'{icon}&nbsp; {texto}</div>')
 
 
 @st.fragment(run_every=ATUALIZAR_A_CADA)
