@@ -14,13 +14,46 @@ Persistência: SQLite em memória por padrão (protótipo); PostgreSQL/Supabase
 quando houver DATABASE_URL (veja `get_repo()`).
 """
 
+import hashlib
 import html
+import importlib
 import os
+import sys
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import streamlit as st
+
+
+def _recarregar_modulos_alterados() -> str:
+    """
+    Depois de uma atualização (git pull / deploy no Streamlit Cloud) o Streamlit
+    roda o app.py novo, mas pode continuar com config.py/repository.py ANTIGOS
+    na memória do Python — e o app quebra misturando as duas versões. Aqui
+    comparamos o conteúdo dos arquivos com o que foi carregado e recarregamos
+    o que mudou. Retorna uma "impressão digital" do código do banco.
+    """
+    pasta = Path(__file__).parent
+    versao_banco = ""
+    for nome, arquivos in (("config", ["config.py"]), ("repository", ["repository.py", "schema.sql"])):
+        h = hashlib.sha1()
+        for arq in arquivos:
+            h.update((pasta / arq).read_bytes())
+        digital = h.hexdigest()
+        modulo = sys.modules.get(nome)
+        if modulo is not None and getattr(modulo, "_VG_VERSAO", None) != digital:
+            modulo = importlib.reload(modulo)
+        if modulo is None:
+            modulo = importlib.import_module(nome)
+        modulo._VG_VERSAO = digital
+        if nome == "repository":
+            versao_banco = digital
+    return versao_banco
+
+
+VERSAO_BANCO = _recarregar_modulos_alterados()
 
 from config import COR_PADRAO, PALETA, TIPO_CARRO, TIPO_MOTO, emoji_da_cor, rotulo_da_cor
 from repository import OperacaoInvalida, PostgresRepository, SQLiteRepository
@@ -120,12 +153,16 @@ AMBIENTE = (ler_config("AMBIENTE") or "producao").strip().lower()
 # ------------------------------------------------------------------
 # Repositório (único, mantido entre reruns do Streamlit)
 # ------------------------------------------------------------------
-@st.cache_resource
-def get_repo():
+@st.cache_resource(max_entries=1)
+def get_repo(versao: str):
     """
     Escolhe a persistência automaticamente:
       1. DATABASE_URL (secrets ou variável de ambiente) → PostgreSQL
       2. fallback: SQLite em memória                    (protótipo; zera ao reiniciar)
+
+    `versao` muda quando repository.py/schema.sql mudam: assim, depois de uma
+    atualização (git pull / deploy no Streamlit Cloud), o app cria um
+    repositório novo em vez de continuar usando o objeto antigo do cache.
     """
     dsn = ler_config("DATABASE_URL")
     if dsn:
@@ -134,7 +171,7 @@ def get_repo():
     return SQLiteRepository(":memory:")
 
 
-repo = get_repo()
+repo = get_repo(VERSAO_BANCO)
 usando_pg = isinstance(repo, PostgresRepository)
 BANCO = "PostgreSQL ✅" if usando_pg else "SQLite (memória) ⚠️"
 
