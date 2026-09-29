@@ -18,6 +18,7 @@ import hashlib
 import html
 import importlib
 import os
+import re
 import sys
 import time
 import uuid
@@ -209,6 +210,16 @@ def num(valor) -> int:
     return 0 if valor is None or valor != valor else int(valor)
 
 
+def texto_puro(texto: str) -> str:
+    """
+    Nome digitado pelo usuário para exibir em texto com formatação (markdown):
+    símbolos como * _ [ ] # viram texto normal em vez de negrito, link, título...
+    """
+    texto = re.sub(r"([\\`*_\[\]<>#|~$])", r"\\\1", str(texto))
+    # "1. Área" / "- Área" no começo virariam lista
+    return re.sub(r"^(\d+)([.)])|^([-+])", lambda m: (f"{m[1]}\\{m[2]}" if m[1] else f"\\{m[3]}"), texto)
+
+
 def avisar(msg: str, icon: str = "✅"):
     """Guarda um aviso para mostrar depois do st.rerun()."""
     st.session_state["aviso"] = (msg, icon)
@@ -252,6 +263,9 @@ def registrar(tipo_id: int, local_id: int, mov: str, nome_area: str):
         st.session_state["aviso_painel"] = (
             "Toque repetido ignorado. Se era outro veículo, toque de novo.", "⏳", AVISO_CURTO_SEGUNDOS)
         return
+    # marca já, antes de ir ao banco: toques repetidos podem rodar ao mesmo
+    # tempo que este (internet lenta) e precisam enxergar a marca
+    st.session_state["ultimo_registro"] = (chave, time.monotonic())
     try:
         r = repo.registrar(tipo_id, local_id, mov)
     except OperacaoInvalida as e:
@@ -370,7 +384,7 @@ def tela_inicial():
     for e in eventos:
         with st.container(border=True):
             info, acao = st.columns([4, 1], vertical_alignment="center")
-            info.markdown(f"#### {e['nome']}")
+            info.markdown(f"#### {texto_puro(e['nome'])}")
             info.caption(
                 f"{e['n_areas']} área(s) · {e['capacidade']} vagas · "
                 f"criado em {fmt_data(e['criado_em'])}"
@@ -406,13 +420,32 @@ def tela_novo_evento():
     st.caption(f"{len(areas)} área(s) · capacidade total: **{total}** vagas")
 
     if st.button("Criar evento", type="primary", width="stretch"):
+        # Toque repetido (internet lenta): cada toque roda ao mesmo tempo que o
+        # primeiro, que ainda está criando o evento — e criaria uma cópia dele.
+        # O pedido é marcado ANTES de criar; os repetidos esperam e só abrem o evento.
+        pedido = st.session_state.get("criando_evento")  # {"nome", "id", "quando", "falhou"}
+        if pedido and pedido["nome"] == nome.strip() and time.monotonic() - pedido["quando"] < 60:
+            for _ in range(150):
+                if pedido["id"] or pedido["falhou"]:
+                    break
+                time.sleep(0.1)
+            if pedido["id"]:
+                ir_para(evento=pedido["id"])
+                st.rerun()
+        pedido = {"nome": nome.strip(), "id": None, "quando": time.monotonic(), "falhou": False}
+        st.session_state["criando_evento"] = pedido
         try:
             evento_id = repo.criar_evento(nome, areas)
         except OperacaoInvalida as e:
+            pedido["falhou"] = True
             st.error(str(e))
             return
+        except Exception:
+            pedido["falhou"] = True
+            raise
+        pedido["id"] = evento_id
         st.session_state.pop("novo_areas_linhas", None)  # descarta o rascunho
-        avisar(f"Evento “{nome.strip()}” criado!")
+        avisar(f"Evento “{texto_puro(nome.strip())}” criado!")
         ir_para(evento=evento_id)
         st.rerun()
 
@@ -459,7 +492,7 @@ def secao_zerar_evento(evento: dict, versao: int):
         "apagados). Use antes de começar o evento, para limpar os testes."
     )
     confirmacao = st.text_input(
-        f"Para confirmar, digite o nome do evento: **{evento['nome']}**",
+        f"Para confirmar, digite o nome do evento: **{texto_puro(evento['nome'])}**",
         key=f"zerar_{evento_id}_{versao}",
     )
     confirmado = confirmacao.strip().casefold() == evento["nome"].strip().casefold()
@@ -683,9 +716,10 @@ def painel_areas(evento_id: int):
         ocup_area = ocup_carro + ocup_moto
         sobrando = cap_area - ocup_area
 
-        titulo = f"{area['nome']}      🚗 {ocup_carro}/{cap_carro}    🏍️ {ocup_moto}/{cap_moto}"
+        nome = texto_puro(area["nome"])
+        titulo = f"{nome}      🚗 {ocup_carro}/{cap_carro}    🏍️ {ocup_moto}/{cap_moto}"
         if sobrando <= 0:
-            titulo = f"⛔ {area['nome']} lotada      🚗 {ocup_carro}/{cap_carro}    🏍️ {ocup_moto}/{cap_moto}"
+            titulo = f"⛔ {nome} lotada      🚗 {ocup_carro}/{cap_carro}    🏍️ {ocup_moto}/{cap_moto}"
 
         # key fixa: sem ela o card fecha a cada clique, pois o título (contagem) muda
         with st.expander(titulo, expanded=(i == 0), key=f"area_{local_id}"):
@@ -762,7 +796,9 @@ if "aviso" in st.session_state:
 params = st.query_params
 if "evento" in params:
     evento_param = params["evento"]
-    if evento_param.isdigit():
+    # só números comuns e de tamanho razoável (ex.: "²" ou um número gigante
+    # vindos de um link quebrado derrubavam a página)
+    if re.fullmatch(r"[0-9]{1,9}", evento_param):
         tela_evento(int(evento_param))
     else:
         ir_para()
