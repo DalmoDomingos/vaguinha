@@ -55,7 +55,7 @@ def _recarregar_modulos_alterados() -> str:
 
 VERSAO_BANCO = _recarregar_modulos_alterados()
 
-from config import COR_PADRAO, PALETA, TIPO_CARRO, TIPO_MOTO, emoji_da_cor, rotulo_da_cor
+from config import COR_PADRAO, PALETA, TIPO_CARRO, TIPO_MOTO, rotulo_da_cor
 from repository import OperacaoInvalida, PostgresRepository, SQLiteRepository
 
 st.set_page_config(page_title="Lotação", page_icon="🅿️", layout="centered")
@@ -543,10 +543,34 @@ def tela_evento(evento_id: int):
     st.caption(f"Controle de vagas por área · Banco: {BANCO}")
 
     st.html(TRAVA_JS, unsafe_allow_javascript=True)
+    st.html(f"<style>{CSS_CARDS}</style>")
     painel_areas(evento_id)
     # no fim: operadores quase não usam, e o "zerar" fica longe de toques acidentais
     st.divider()
     secao_editar_evento(evento, repo.listar_areas(evento_id))
+
+
+# ---- Cor de cada área no card todo ----
+# Cada card recebe a sua cor em --cor (ver painel_areas): cabeçalho na cor,
+# conteúdo num tom claro dela, barras na cor. Entrada = botão cheio na cor;
+# Saída = só contorno (formas diferentes evitam o toque errado com pressa).
+_CARD = '[class*="st-key-area_"]'
+CSS_CARDS = f"""
+  {_CARD} details {{ border: 2px solid var(--cor) !important; overflow: hidden;
+                     background: color-mix(in srgb, var(--cor) 13%, transparent); }}
+  {_CARD} summary, {_CARD} summary:hover, {_CARD} summary:focus, {_CARD} summary:focus-visible {{
+      background: var(--cor) !important; border-radius: 0 !important; }}
+  {_CARD} summary, {_CARD} summary:hover, {_CARD} summary p {{ color: var(--texto-cor, #fff) !important; }}
+  {_CARD} summary svg, {_CARD} summary [data-testid="stIconMaterial"] {{ color: var(--texto-cor, #fff) !important; }}
+  {_CARD} [data-testid="stProgressBarTrack"] > div {{ background: var(--cor) !important; }}
+  {_CARD} [data-testid="stBaseButton-primary"] {{
+      background: var(--cor) !important; border: 2px solid var(--cor) !important; color: var(--texto-cor, #fff) !important; }}
+  {_CARD} [data-testid="stBaseButton-secondary"] {{
+      background: transparent !important; border: 2px solid var(--cor) !important; color: var(--cor) !important; }}
+  {_CARD} button p, {_CARD} button [data-testid="stIconMaterial"] {{ color: inherit !important; }}
+"""
+# Área lotada: cabeçalho em faixa amarela com texto escuro
+CSS_LOTADA = "--cor:#F2B705;--texto-cor:#2F3438;"
 
 
 @st.fragment(run_every=ATUALIZAR_A_CADA)
@@ -592,6 +616,16 @@ def painel_areas(evento_id: int):
     st.divider()
 
     # ---- Áreas como cards expansíveis ----
+    # Cor de cada área no card todo: cada card recebe a sua cor em --cor e o
+    # CSS_CARDS usa essa variável. Área lotada: cabeçalho amarelo.
+    cores = "".join(
+        f".st-key-area_{a['id']}{{--cor:{a['cor'] or COR_PADRAO}}}" for a in areas
+    ) + "".join(
+        f".st-key-area_{a['id']}{{{CSS_LOTADA}}}" for a in areas
+        if a["cap_carro"] + a["cap_moto"] - a["ocup_carro"] - a["ocup_moto"] <= 0
+    )
+    st.html(f"<style>{cores}</style>")
+
     for i, area in enumerate(areas):
         local_id = area["id"]
         cap_carro, cap_moto = area["cap_carro"], area["cap_moto"]
@@ -601,51 +635,48 @@ def painel_areas(evento_id: int):
         ocup_area = ocup_carro + ocup_moto
         sobrando = cap_area - ocup_area
 
-        # Barra de cor + bolinha da cor no título
-        cor = area["cor"] or COR_PADRAO
-        bolinha = emoji_da_cor(cor)
-        titulo = (f"{bolinha} {area['nome']}".strip()
-                  + f"  —  🚗 {ocup_carro}/{cap_carro}   🏍️ {ocup_moto}/{cap_moto}")
+        titulo = f"{area['nome']}      🚗 {ocup_carro}/{cap_carro}    🏍️ {ocup_moto}/{cap_moto}"
+        if sobrando <= 0:
+            titulo = f"⛔ {area['nome']} lotada      🚗 {ocup_carro}/{cap_carro}    🏍️ {ocup_moto}/{cap_moto}"
 
         # key fixa: sem ela o card fecha a cada clique, pois o título (contagem) muda
         with st.expander(titulo, expanded=(i == 0), key=f"area_{local_id}"):
-            st.markdown(
-                f"<div style='height:6px;border-radius:3px;background:{cor};margin:-4px 0 10px'></div>",
-                unsafe_allow_html=True,
-            )
-
             # ---- Motos ----
-            st.markdown(f"**🏍️ {ocup_moto:02d}/{cap_moto} motos**")
+            st.markdown(f"🏍️ Motos **{ocup_moto}**/{cap_moto}")
             with st.container(key=f"mov_moto_{local_id}"):
                 m1, m2 = st.columns(2)
                 m1.button(
-                    "➕ Entrada", key=f"mot_in_{local_id}", width="stretch",
+                    "Entrada", key=f"mot_in_{local_id}", width="stretch",
+                    type="primary", icon=":material/add:",
                     on_click=registrar, args=(TIPO_MOTO, local_id, "entrada", area["nome"]),
                 )
                 m2.button(
-                    "➖ Saída", key=f"mot_out_{local_id}", width="stretch",
+                    "Saída", key=f"mot_out_{local_id}", width="stretch",
+                    icon=":material/remove:",
                     on_click=registrar, args=(TIPO_MOTO, local_id, "saida", area["nome"]),
                 )
 
             # ---- Carros ----
-            st.markdown(f"**🚗 {ocup_carro:02d}/{cap_carro} carros**")
+            st.markdown(f"🚗 Carros **{ocup_carro}**/{cap_carro}")
             with st.container(key=f"mov_carro_{local_id}"):
                 c1b, c2b = st.columns(2)
                 c1b.button(
-                    "➕ Entrada", key=f"car_in_{local_id}", width="stretch",
+                    "Entrada", key=f"car_in_{local_id}", width="stretch",
+                    type="primary", icon=":material/add:",
                     on_click=registrar, args=(TIPO_CARRO, local_id, "entrada", area["nome"]),
                 )
                 c2b.button(
-                    "➖ Saída", key=f"car_out_{local_id}", width="stretch",
+                    "Saída", key=f"car_out_{local_id}", width="stretch",
+                    icon=":material/remove:",
                     on_click=registrar, args=(TIPO_CARRO, local_id, "saida", area["nome"]),
                 )
 
-            st.write(f"**Vagas sobrando: {sobrando}**")
+            st.markdown(f"Vagas livres na área: **{sobrando}**")
 
             # ---- Barras de ocupação ----
-            st.progress(pct(ocup_carro, cap_carro), text=f"% carros — {pct(ocup_carro, cap_carro)*100:.0f}%")
-            st.progress(pct(ocup_moto, cap_moto), text=f"% motos — {pct(ocup_moto, cap_moto)*100:.0f}%")
-            st.progress(pct(ocup_area, cap_area), text=f"% total — {pct(ocup_area, cap_area)*100:.0f}%")
+            st.progress(pct(ocup_carro, cap_carro), text=f"Carros: {pct(ocup_carro, cap_carro)*100:.0f}% ocupado")
+            st.progress(pct(ocup_moto, cap_moto), text=f"Motos: {pct(ocup_moto, cap_moto)*100:.0f}% ocupado")
+            st.progress(pct(ocup_area, cap_area), text=f"Área: {pct(ocup_area, cap_area)*100:.0f}% ocupada")
 
             # ---- Histórico recente da área (só consulta o banco se ligado) ----
             if st.toggle("Ver histórico", key=f"hist_{local_id}"):

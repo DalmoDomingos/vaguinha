@@ -18,6 +18,8 @@ ocupados = Σ entradas − Σ saídas   (por área e por tipo de veículo)
   o evento em "⚙️ Editar evento". (Área com veículos estacionados não pode ser
   excluída: dê saída antes.)
 - Botões de **entrada** e **saída** por tipo de veículo, respeitando a lotação.
+- Cada área aparece num **card na sua cor** (cabeçalho, fundo e barras). Entrada
+  é o botão cheio e Saída o de contorno; área lotada fica com o cabeçalho **amarelo**.
 - Barras de ocupação (% carros, % motos, % total) e vagas restantes.
 - Histórico de movimentações por área.
 
