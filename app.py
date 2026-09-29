@@ -225,11 +225,15 @@ def ir_para(evento=None, tela=None):
 
 # Pop-up de confirmação: some rápido para não atrapalhar o próximo registro.
 AVISO_OK_SEGUNDOS = 2
-# Toque no MESMO botão chegando logo depois do anterior ter sido processado é
-# tratado como toque repetido (internet lenta: o operador tocou de novo achando
-# que não tinha ido): esses chegam colados, a menos de 0,1 s. Um segundo veículo
-# de verdade leva mais (a trava na tela só solta depois da resposta).
+# Toque no MESMO botão chegando logo depois do anterior é tratado como toque
+# repetido (internet lenta: o operador tocou de novo achando que não tinha ido).
+# O prazo conta a partir do ÚLTIMO toque, inclusive dos ignorados: uma rajada
+# de toques vira 1 registro. Um segundo veículo de verdade vem depois de uma
+# pausa maior que isso (a trava na tela só solta depois da resposta).
 TOQUE_REPETIDO_SEGUNDOS = 0.3
+# Duração dos pop-ups de problema (o de sucesso usa AVISO_OK_SEGUNDOS)
+AVISO_CURTO_SEGUNDOS = 4
+AVISO_LONGO_SEGUNDOS = 10
 
 
 def registrar(tipo_id: int, local_id: int, mov: str, nome_area: str):
@@ -242,18 +246,19 @@ def registrar(tipo_id: int, local_id: int, mov: str, nome_area: str):
     # um callback de fragmento não é suportado pelo Streamlit) e só aparecem
     # para quem registrou: cada operador tem a sua sessão.
     chave = (tipo_id, local_id, mov)
-    anterior = st.session_state.get("ultimo_registro")  # (chave, quando terminou)
+    anterior = st.session_state.get("ultimo_registro")  # (chave, quando foi o último toque)
     if anterior and anterior[0] == chave and time.monotonic() - anterior[1] < TOQUE_REPETIDO_SEGUNDOS:
+        st.session_state["ultimo_registro"] = (chave, time.monotonic())
         st.session_state["aviso_painel"] = (
-            "Toque repetido ignorado. Se era outro veículo, toque de novo.", "⏳", "short")
+            "Toque repetido ignorado. Se era outro veículo, toque de novo.", "⏳", AVISO_CURTO_SEGUNDOS)
         return
     try:
         r = repo.registrar(tipo_id, local_id, mov)
     except OperacaoInvalida as e:
-        st.session_state["aviso_painel"] = (str(e), "⚠️", "short")
+        st.session_state["aviso_painel"] = (str(e), "⚠️", AVISO_CURTO_SEGUNDOS)
         return
     except Exception as e:
-        st.session_state["aviso_painel"] = (f"Erro ao registrar movimento: {e}", "❌", "long")
+        st.session_state["aviso_painel"] = (f"Erro ao registrar movimento: {e}", "❌", AVISO_LONGO_SEGUNDOS)
         return
     finally:
         st.session_state["ultimo_registro"] = (chave, time.monotonic())
@@ -477,9 +482,9 @@ TRAVA_JS = """
 (() => {
   if (window.__vgTrava) return;
   window.__vgTrava = true;
-  const BOTOES = '[class*="st-key-mov_"] button';
+  const FAIXAS = '[class*="st-key-mov_"]', BOTOES = FAIXAS + ' button';
   const MINIMO_MS = 250, MAXIMO_MS = 12000;
-  let travadoEm = 0, viuRodando = false, observador = null;
+  let travadoEm = 0, ultimoToque = 0, viuRodando = false, observador = null;
 
   const estado = () => {
     const app = document.querySelector('[data-testid="stApp"]');
@@ -501,21 +506,28 @@ TRAVA_JS = """
   };
   // Destrava quando o Streamlit parar de rodar depois do toque. Se o toque
   // aconteceu durante uma atualização automática (já "running"), essa execução
-  // é emendada com a do registro e conta também.
+  // é emendada com a do registro e conta também. Toques bloqueados renovam o
+  // prazo mínimo: numa rajada de toques, só destrava depois que o dedo para.
   setInterval(() => {
     if (!travadoEm) return;
     const passou = Date.now() - travadoEm;
     if (estado() === "running") { viuRodando = true; }
-    else if (viuRodando && passou >= MINIMO_MS) { destravar(); }
+    else if (viuRodando && passou >= MINIMO_MS && Date.now() - ultimoToque >= MINIMO_MS) { destravar(); }
     if (travadoEm && passou >= MAXIMO_MS) destravar();
   }, 100);
 
   document.addEventListener("click", (ev) => {
-    const botao = ev.target.closest && ev.target.closest(BOTOES);
+    if (!ev.target.closest) return;
+    // Travado, o botão não recebe o toque (pointer-events: none): o toque cai
+    // na faixa de botões atrás dele — e também conta como toque repetido.
+    if (travadoEm) {
+      if (ev.target.closest(FAIXAS)) { ultimoToque = Date.now(); ev.preventDefault(); ev.stopImmediatePropagation(); }
+      return;
+    }
+    const botao = ev.target.closest(BOTOES);
     if (!botao) return;
-    if (travadoEm) { ev.preventDefault(); ev.stopImmediatePropagation(); return; }
     observar();
-    travadoEm = Date.now();
+    travadoEm = ultimoToque = Date.now();
     viuRodando = estado() === "running";
     document.body.classList.add("vg-travado");
     botao.classList.add("vg-carregando");
@@ -543,7 +555,7 @@ def tela_evento(evento_id: int):
     st.caption(f"Controle de vagas por área · Banco: {BANCO}")
 
     st.html(TRAVA_JS, unsafe_allow_javascript=True)
-    st.html(f"<style>{CSS_CARDS}</style>")
+    st.html(f"<style>{CSS_CARDS}{CSS_AVISO}</style>")
     painel_areas(evento_id)
     # no fim: operadores quase não usam, e o "zerar" fica longe de toques acidentais
     st.divider()
@@ -573,22 +585,58 @@ CSS_CARDS = f"""
 CSS_LOTADA = "--cor:#F2B705;--texto-cor:#2F3438;"
 
 
+# Pop-up do painel (confirmação de registro). Não usa st.toast: com um pop-up
+# ainda na tela, o Streamlit não mostrava o seguinte — e com dois registros
+# seguidos o operador ficava sem a confirmação do segundo. Este é substituído
+# na hora por cada aviso novo e fica por cima da tela (não empurra os botões).
+CSS_AVISO = """
+  .st-key-aviso { position: absolute; height: 0; overflow: visible; }
+  .vg-aviso {
+      position: fixed; z-index: 1000; left: 50%; top: 4.2rem;
+      transform: translateX(-50%);
+      max-width: min(30rem, calc(100vw - 2rem)); width: max-content;
+      padding: 0.7rem 1.1rem; border-radius: 10px;
+      background: #2F3438; color: #fff; font-size: 1.05rem; line-height: 1.35;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+      pointer-events: none;
+      animation: vg-aviso var(--duracao) ease-in-out forwards;
+  }
+  @keyframes vg-aviso {
+      0% { opacity: 0; transform: translate(-50%, -0.5rem); }
+      6%, 88% { opacity: 1; transform: translate(-50%, 0); }
+      100% { opacity: 0; visibility: hidden; transform: translate(-50%, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+      @keyframes vg-aviso { 0%, 90% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
+  }
+"""
+
+
+def mostrar_aviso_painel():
+    """Mostra o aviso pendente (e o mantém enquanto dura, nas atualizações do painel)."""
+    agora = time.monotonic()
+    if "aviso_painel" in st.session_state:
+        msg, icon, segundos = st.session_state.pop("aviso_painel")
+        n = st.session_state["avisos_mostrados"] = st.session_state.get("avisos_mostrados", 0) + 1
+        st.session_state["aviso_ativo"] = (n, msg, icon, segundos, agora + segundos)
+    with st.container(key="aviso"):
+        ativo = st.session_state.get("aviso_ativo")
+        if ativo and agora < ativo[4]:
+            n, msg, icon, segundos, _ = ativo
+            # texto vem do banco (nome da área): escapa e só então aplica o **negrito**
+            partes = html.escape(msg).split("**")
+            texto = "".join(f"<b>{p}</b>" if i % 2 else p for i, p in enumerate(partes))
+            st.html(f'<div class="vg-aviso" role="status" data-n="{n}" '
+                    f'style="--duracao:{segundos}s">{icon}&nbsp; {texto}</div>')
+
+
 @st.fragment(run_every=ATUALIZAR_A_CADA)
 def painel_areas(evento_id: int):
     """
     Resumo + cards das áreas. É um fragmento: os cliques de entrada/saída e a
     atualização automática refazem só este trecho (1 consulta), não a página.
     """
-    if "aviso_painel" in st.session_state:
-        msg, icon, duracao = st.session_state.pop("aviso_painel")
-        # O Streamlit identifica cada pop-up pela posição em que foi criado: no
-        # mesmo lugar, o 2º pop-up (dois veículos seguidos) era tratado como o 1º,
-        # ainda visível, e não aparecia. Marcadores vazios antes dele mudam a
-        # posição a cada aviso (até 5 avisos seguidos na tela, cada um no seu lugar).
-        n = st.session_state["avisos_mostrados"] = st.session_state.get("avisos_mostrados", 0) + 1
-        for _ in range(n % 5):
-            st.empty()
-        st.toast(msg, icon=icon, duration=duracao)
+    mostrar_aviso_painel()
 
     areas = repo.painel_evento(evento_id)  # áreas + ocupação, numa consulta só
 
