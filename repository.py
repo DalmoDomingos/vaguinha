@@ -117,9 +117,6 @@ SQL_EVENTOS = f"""
     GROUP BY e.id, e.nome, e.criado_em
     ORDER BY e.criado_em DESC, e.id DESC
 """
-SQL_SALDO_AREA = (
-    f"SELECT COALESCE({SALDO_EXPR}, 0) FROM movimentacao WHERE local_id = ? AND {ATIVA}"
-)
 SQL_SALDO_UM = (
     f"SELECT COALESCE({SALDO_EXPR}, 0) FROM movimentacao "
     f"WHERE local_id = ? AND tipo_veiculo_id = ? AND {ATIVA}"
@@ -165,6 +162,13 @@ class Repository(ABC):
         (o lock da transação basta).
         """
         return ""
+
+    def _travar_areas_do_evento(self, cur, evento_id: int) -> None:
+        """
+        Pega a mesma trava do registrar() para todas as áreas do evento: quem
+        edita espera os registros em andamento terminarem (e os novos esperam a
+        edição). Padrão: nada (o lock da transação basta).
+        """
 
     def _ler(self, consulta):
         with self._transacao(escrita=False) as cur:
@@ -265,16 +269,19 @@ class Repository(ABC):
         """
         areas = _normalizar_areas(areas)
         with self._transacao() as cur:
+            # antes de ler a ocupação: um registro em andamento termina primeiro
+            self._travar_areas_do_evento(cur, evento_id)
             self._exec(cur, "SELECT id, nome FROM local WHERE evento_id = ?", (evento_id,))
             existentes = {int(r[0]): r[1] for r in cur.fetchall()}
             mantidas = {a["id"] for a in areas if a["id"] is not None}
             if mantidas - existentes.keys():
                 raise OperacaoInvalida("Alguma área não pertence mais a este evento. "
                                        "Recarregue a página e tente de novo.")
+            self._exec(cur, SQL_SALDOS_EVENTO, (evento_id,))
+            ocupacao = {(int(r[0]), int(r[1])): int(r[2]) for r in cur.fetchall()}
 
             for local_id in existentes.keys() - mantidas:
-                self._exec(cur, SQL_SALDO_AREA, (local_id,))
-                ocupados = int(cur.fetchone()[0])
+                ocupados = ocupacao.get((local_id, TIPO_CARRO), 0) + ocupacao.get((local_id, TIPO_MOTO), 0)
                 if ocupados > 0:
                     raise OperacaoInvalida(
                         f"Não dá para excluir “{existentes[local_id]}”: ainda há "
@@ -282,6 +289,16 @@ class Repository(ABC):
                     )
                 self._exec(cur, "DELETE FROM movimentacao WHERE local_id = ?", (local_id,))
                 self._exec(cur, "DELETE FROM local WHERE id = ?", (local_id,))
+
+            # vagas não podem ficar abaixo do que já está estacionado
+            for a in areas:
+                for tipo, campo, nome_tipo in ((TIPO_CARRO, "cap_carro", "carro"), (TIPO_MOTO, "cap_moto", "moto")):
+                    ocupados = ocupacao.get((a["id"], tipo), 0) if a["id"] is not None else 0
+                    if a[campo] < ocupados:
+                        raise OperacaoInvalida(
+                            f"“{a['nome']}” tem {ocupados} {nome_tipo}(s) estacionado(s): as vagas "
+                            f"de {nome_tipo} não podem ser menos que {ocupados}. Dê saída antes."
+                        )
 
             for ordem, a in enumerate(areas):
                 if a["id"] is None:
@@ -532,3 +549,14 @@ class PostgresRepository(Repository):
         # envio da leitura do saldo; como são comandos separados, a leitura só
         # acontece depois de obter a trava e já enxerga o que os outros gravaram.
         return "SELECT pg_advisory_xact_lock(?, ?); "
+
+    def _travar_areas_do_evento(self, cur, evento_id: int) -> None:
+        # sempre na mesma ordem (id, tipo), para duas edições não se travarem
+        self._exec(
+            cur,
+            "SELECT pg_advisory_xact_lock(l.id, t.tipo) FROM local l "
+            f"CROSS JOIN (VALUES ({TIPO_CARRO}), ({TIPO_MOTO})) AS t(tipo) "
+            "WHERE l.evento_id = ? ORDER BY l.id, t.tipo",
+            (evento_id,),
+        )
+        cur.fetchall()

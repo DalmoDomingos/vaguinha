@@ -18,6 +18,7 @@ import hashlib
 import html
 import importlib
 import os
+import re
 import sys
 import time
 import uuid
@@ -49,13 +50,17 @@ def _recarregar_modulos_alterados() -> str:
             modulo = importlib.import_module(nome)
         modulo._VG_VERSAO = digital
         if nome == "repository":
-            versao_banco = digital
+            # inclui QUAL cópia do módulo está carregada: o Streamlit também o
+            # recarrega quando só o config.py muda, e o repositório do cache
+            # (feito com a cópia antiga) levantaria erros que o app não
+            # reconhece (ex.: "Não há veículos..." virava "Erro ao registrar")
+            versao_banco = f"{digital}-{id(modulo)}"
     return versao_banco
 
 
 VERSAO_BANCO = _recarregar_modulos_alterados()
 
-from config import COR_PADRAO, PALETA, TIPO_CARRO, TIPO_MOTO, emoji_da_cor, rotulo_da_cor
+from config import COR_PADRAO, PALETA, TIPO_CARRO, TIPO_MOTO, rotulo_da_cor
 from repository import OperacaoInvalida, PostgresRepository, SQLiteRepository
 
 st.set_page_config(page_title="Lotação", page_icon="🅿️", layout="centered")
@@ -209,6 +214,16 @@ def num(valor) -> int:
     return 0 if valor is None or valor != valor else int(valor)
 
 
+def texto_puro(texto: str) -> str:
+    """
+    Nome digitado pelo usuário para exibir em texto com formatação (markdown):
+    símbolos como * _ [ ] # viram texto normal em vez de negrito, link, título...
+    """
+    texto = re.sub(r"([\\`*_\[\]<>#|~$])", r"\\\1", str(texto))
+    # "1. Área" / "- Área" no começo virariam lista
+    return re.sub(r"^(\d+)([.)])|^([-+])", lambda m: (f"{m[1]}\\{m[2]}" if m[1] else f"\\{m[3]}"), texto)
+
+
 def avisar(msg: str, icon: str = "✅"):
     """Guarda um aviso para mostrar depois do st.rerun()."""
     st.session_state["aviso"] = (msg, icon)
@@ -225,11 +240,15 @@ def ir_para(evento=None, tela=None):
 
 # Pop-up de confirmação: some rápido para não atrapalhar o próximo registro.
 AVISO_OK_SEGUNDOS = 2
-# Toque no MESMO botão chegando logo depois do anterior ter sido processado é
-# tratado como toque repetido (internet lenta: o operador tocou de novo achando
-# que não tinha ido): esses chegam colados, a menos de 0,1 s. Um segundo veículo
-# de verdade leva mais (a trava na tela só solta depois da resposta).
+# Toque no MESMO botão chegando logo depois do anterior é tratado como toque
+# repetido (internet lenta: o operador tocou de novo achando que não tinha ido).
+# O prazo conta a partir do ÚLTIMO toque, inclusive dos ignorados: uma rajada
+# de toques vira 1 registro. Um segundo veículo de verdade vem depois de uma
+# pausa maior que isso (a trava na tela só solta depois da resposta).
 TOQUE_REPETIDO_SEGUNDOS = 0.3
+# Duração dos pop-ups de problema (o de sucesso usa AVISO_OK_SEGUNDOS)
+AVISO_CURTO_SEGUNDOS = 4
+AVISO_LONGO_SEGUNDOS = 10
 
 
 def registrar(tipo_id: int, local_id: int, mov: str, nome_area: str):
@@ -242,18 +261,22 @@ def registrar(tipo_id: int, local_id: int, mov: str, nome_area: str):
     # um callback de fragmento não é suportado pelo Streamlit) e só aparecem
     # para quem registrou: cada operador tem a sua sessão.
     chave = (tipo_id, local_id, mov)
-    anterior = st.session_state.get("ultimo_registro")  # (chave, quando terminou)
+    anterior = st.session_state.get("ultimo_registro")  # (chave, quando foi o último toque)
     if anterior and anterior[0] == chave and time.monotonic() - anterior[1] < TOQUE_REPETIDO_SEGUNDOS:
+        st.session_state["ultimo_registro"] = (chave, time.monotonic())
         st.session_state["aviso_painel"] = (
-            "Toque repetido ignorado. Se era outro veículo, toque de novo.", "⏳", "short")
+            "Toque repetido ignorado. Se era outro veículo, toque de novo.", "⏳", AVISO_CURTO_SEGUNDOS)
         return
+    # marca já, antes de ir ao banco: toques repetidos podem rodar ao mesmo
+    # tempo que este (internet lenta) e precisam enxergar a marca
+    st.session_state["ultimo_registro"] = (chave, time.monotonic())
     try:
         r = repo.registrar(tipo_id, local_id, mov)
     except OperacaoInvalida as e:
-        st.session_state["aviso_painel"] = (str(e), "⚠️", "short")
+        st.session_state["aviso_painel"] = (str(e), "⚠️", AVISO_CURTO_SEGUNDOS)
         return
     except Exception as e:
-        st.session_state["aviso_painel"] = (f"Erro ao registrar movimento: {e}", "❌", "long")
+        st.session_state["aviso_painel"] = (f"Erro ao registrar movimento: {e}", "❌", AVISO_LONGO_SEGUNDOS)
         return
     finally:
         st.session_state["ultimo_registro"] = (chave, time.monotonic())
@@ -365,7 +388,7 @@ def tela_inicial():
     for e in eventos:
         with st.container(border=True):
             info, acao = st.columns([4, 1], vertical_alignment="center")
-            info.markdown(f"#### {e['nome']}")
+            info.markdown(f"#### {texto_puro(e['nome'])}")
             info.caption(
                 f"{e['n_areas']} área(s) · {e['capacidade']} vagas · "
                 f"criado em {fmt_data(e['criado_em'])}"
@@ -401,13 +424,32 @@ def tela_novo_evento():
     st.caption(f"{len(areas)} área(s) · capacidade total: **{total}** vagas")
 
     if st.button("Criar evento", type="primary", width="stretch"):
+        # Toque repetido (internet lenta): cada toque roda ao mesmo tempo que o
+        # primeiro, que ainda está criando o evento — e criaria uma cópia dele.
+        # O pedido é marcado ANTES de criar; os repetidos esperam e só abrem o evento.
+        pedido = st.session_state.get("criando_evento")  # {"nome", "id", "quando", "falhou"}
+        if pedido and pedido["nome"] == nome.strip() and time.monotonic() - pedido["quando"] < 60:
+            for _ in range(150):
+                if pedido["id"] or pedido["falhou"]:
+                    break
+                time.sleep(0.1)
+            if pedido["id"]:
+                ir_para(evento=pedido["id"])
+                st.rerun()
+        pedido = {"nome": nome.strip(), "id": None, "quando": time.monotonic(), "falhou": False}
+        st.session_state["criando_evento"] = pedido
         try:
             evento_id = repo.criar_evento(nome, areas)
         except OperacaoInvalida as e:
+            pedido["falhou"] = True
             st.error(str(e))
             return
+        except Exception:
+            pedido["falhou"] = True
+            raise
+        pedido["id"] = evento_id
         st.session_state.pop("novo_areas_linhas", None)  # descarta o rascunho
-        avisar(f"Evento “{nome.strip()}” criado!")
+        avisar(f"Evento “{texto_puro(nome.strip())}” criado!")
         ir_para(evento=evento_id)
         st.rerun()
 
@@ -454,7 +496,7 @@ def secao_zerar_evento(evento: dict, versao: int):
         "apagados). Use antes de começar o evento, para limpar os testes."
     )
     confirmacao = st.text_input(
-        f"Para confirmar, digite o nome do evento: **{evento['nome']}**",
+        f"Para confirmar, digite o nome do evento: **{texto_puro(evento['nome'])}**",
         key=f"zerar_{evento_id}_{versao}",
     )
     confirmado = confirmacao.strip().casefold() == evento["nome"].strip().casefold()
@@ -477,9 +519,9 @@ TRAVA_JS = """
 (() => {
   if (window.__vgTrava) return;
   window.__vgTrava = true;
-  const BOTOES = '[class*="st-key-mov_"] button';
+  const FAIXAS = '[class*="st-key-mov_"]', BOTOES = FAIXAS + ' button';
   const MINIMO_MS = 250, MAXIMO_MS = 12000;
-  let travadoEm = 0, viuRodando = false, observador = null;
+  let travadoEm = 0, ultimoToque = 0, viuRodando = false, observador = null;
 
   const estado = () => {
     const app = document.querySelector('[data-testid="stApp"]');
@@ -501,21 +543,28 @@ TRAVA_JS = """
   };
   // Destrava quando o Streamlit parar de rodar depois do toque. Se o toque
   // aconteceu durante uma atualização automática (já "running"), essa execução
-  // é emendada com a do registro e conta também.
+  // é emendada com a do registro e conta também. Toques bloqueados renovam o
+  // prazo mínimo: numa rajada de toques, só destrava depois que o dedo para.
   setInterval(() => {
     if (!travadoEm) return;
     const passou = Date.now() - travadoEm;
     if (estado() === "running") { viuRodando = true; }
-    else if (viuRodando && passou >= MINIMO_MS) { destravar(); }
+    else if (viuRodando && passou >= MINIMO_MS && Date.now() - ultimoToque >= MINIMO_MS) { destravar(); }
     if (travadoEm && passou >= MAXIMO_MS) destravar();
   }, 100);
 
   document.addEventListener("click", (ev) => {
-    const botao = ev.target.closest && ev.target.closest(BOTOES);
+    if (!ev.target.closest) return;
+    // Travado, o botão não recebe o toque (pointer-events: none): o toque cai
+    // na faixa de botões atrás dele — e também conta como toque repetido.
+    if (travadoEm) {
+      if (ev.target.closest(FAIXAS)) { ultimoToque = Date.now(); ev.preventDefault(); ev.stopImmediatePropagation(); }
+      return;
+    }
+    const botao = ev.target.closest(BOTOES);
     if (!botao) return;
-    if (travadoEm) { ev.preventDefault(); ev.stopImmediatePropagation(); return; }
     observar();
-    travadoEm = Date.now();
+    travadoEm = ultimoToque = Date.now();
     viuRodando = estado() === "running";
     document.body.classList.add("vg-travado");
     botao.classList.add("vg-carregando");
@@ -543,10 +592,85 @@ def tela_evento(evento_id: int):
     st.caption(f"Controle de vagas por área · Banco: {BANCO}")
 
     st.html(TRAVA_JS, unsafe_allow_javascript=True)
+    st.html(f"<style>{CSS_CARDS}{CSS_AVISO}</style>")
     painel_areas(evento_id)
     # no fim: operadores quase não usam, e o "zerar" fica longe de toques acidentais
     st.divider()
     secao_editar_evento(evento, repo.listar_areas(evento_id))
+
+
+# ---- Cor de cada área no card todo ----
+# Cada card recebe a sua cor em --cor (ver painel_areas): cabeçalho na cor,
+# conteúdo num tom claro dela, barras na cor. Entrada = botão cheio na cor;
+# Saída = só contorno (formas diferentes evitam o toque errado com pressa).
+_CARD = '[class*="st-key-area_"]'
+CSS_CARDS = f"""
+  {_CARD} details {{ border: 2px solid var(--cor) !important; overflow: hidden;
+                     background: color-mix(in srgb, var(--cor) 13%, transparent); }}
+  {_CARD} summary, {_CARD} summary:hover, {_CARD} summary:focus, {_CARD} summary:focus-visible {{
+      background: var(--cor) !important; border-radius: 0 !important; }}
+  {_CARD} summary, {_CARD} summary:hover, {_CARD} summary p {{ color: var(--texto-cor, #fff) !important; }}
+  {_CARD} summary svg, {_CARD} summary [data-testid="stIconMaterial"] {{ color: var(--texto-cor, #fff) !important; }}
+  {_CARD} [data-testid="stProgressBarTrack"] > div {{ background: var(--cor) !important; }}
+  {_CARD} [data-testid="stBaseButton-primary"] {{
+      background: var(--cor) !important; border: 2px solid var(--cor) !important; color: var(--texto-cor, #fff) !important; }}
+  {_CARD} [data-testid="stBaseButton-secondary"] {{
+      background: transparent !important; border: 2px solid var(--cor) !important; color: var(--cor) !important; }}
+  {_CARD} button p, {_CARD} button [data-testid="stIconMaterial"] {{ color: inherit !important; }}
+"""
+# Área lotada: cabeçalho em faixa amarela com texto escuro
+CSS_LOTADA = "--cor:#F2B705;--texto-cor:#2F3438;"
+
+
+# Pop-up do painel (confirmação de registro). Não usa st.toast: com um pop-up
+# ainda na tela, o Streamlit não mostrava o seguinte — e com dois registros
+# seguidos o operador ficava sem a confirmação do segundo. Este é substituído
+# na hora por cada aviso novo e fica por cima da tela (não empurra os botões).
+CSS_AVISO = """
+  /* fora do fluxo da página (inclusive a caixa que o Streamlit põe em volta),
+     para o pop-up não empurrar os botões quando aparece */
+  .st-key-aviso, [data-testid="stLayoutWrapper"]:has(> .st-key-aviso) {
+      position: absolute !important; height: 0 !important; margin: 0 !important; overflow: visible; }
+  .vg-aviso {
+      position: fixed; z-index: 1000; left: 50%; top: 4.2rem;
+      transform: translateX(-50%);
+      max-width: min(30rem, calc(100vw - 2rem)); width: max-content;
+      padding: 0.7rem 1.1rem; border-radius: 10px;
+      background: #2F3438; color: #fff; font-size: 1.05rem; line-height: 1.35;
+      box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25);
+      pointer-events: none;
+      animation: vg-aviso var(--duracao) ease-in-out forwards;
+  }
+  @keyframes vg-aviso {
+      0% { opacity: 0; transform: translate(-50%, -0.5rem); }
+      6%, 88% { opacity: 1; transform: translate(-50%, 0); }
+      100% { opacity: 0; visibility: hidden; transform: translate(-50%, 0); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+      @keyframes vg-aviso { 0%, 90% { opacity: 1; } 100% { opacity: 0; visibility: hidden; } }
+  }
+"""
+
+
+def mostrar_aviso_painel():
+    """Mostra o aviso pendente (e o mantém enquanto dura, nas atualizações do painel)."""
+    agora = time.monotonic()
+    if "aviso_painel" in st.session_state:
+        msg, icon, segundos = st.session_state.pop("aviso_painel")
+        n = st.session_state["avisos_mostrados"] = st.session_state.get("avisos_mostrados", 0) + 1
+        st.session_state["aviso_ativo"] = (n, msg, icon, segundos, agora + segundos)
+    with st.container(key="aviso"):
+        ativo = st.session_state.get("aviso_ativo")
+        if ativo and agora < ativo[4]:
+            n, msg, icon, segundos, fim = ativo
+            # atualização automática no meio: a animação continua de onde estava
+            decorrido = max(0.0, segundos - (fim - agora))
+            # texto vem do banco (nome da área): escapa e só então aplica o **negrito**
+            partes = html.escape(msg).split("**")
+            texto = "".join(f"<b>{p}</b>" if i % 2 else p for i, p in enumerate(partes))
+            st.html(f'<div class="vg-aviso" role="status" data-n="{n}" '
+                    f'style="--duracao:{segundos}s;animation-delay:-{decorrido:.1f}s">'
+                    f'{icon}&nbsp; {texto}</div>')
 
 
 @st.fragment(run_every=ATUALIZAR_A_CADA)
@@ -555,16 +679,7 @@ def painel_areas(evento_id: int):
     Resumo + cards das áreas. É um fragmento: os cliques de entrada/saída e a
     atualização automática refazem só este trecho (1 consulta), não a página.
     """
-    if "aviso_painel" in st.session_state:
-        msg, icon, duracao = st.session_state.pop("aviso_painel")
-        # O Streamlit identifica cada pop-up pela posição em que foi criado: no
-        # mesmo lugar, o 2º pop-up (dois veículos seguidos) era tratado como o 1º,
-        # ainda visível, e não aparecia. Marcadores vazios antes dele mudam a
-        # posição a cada aviso (até 5 avisos seguidos na tela, cada um no seu lugar).
-        n = st.session_state["avisos_mostrados"] = st.session_state.get("avisos_mostrados", 0) + 1
-        for _ in range(n % 5):
-            st.empty()
-        st.toast(msg, icon=icon, duration=duracao)
+    mostrar_aviso_painel()
 
     areas = repo.painel_evento(evento_id)  # áreas + ocupação, numa consulta só
 
@@ -592,6 +707,16 @@ def painel_areas(evento_id: int):
     st.divider()
 
     # ---- Áreas como cards expansíveis ----
+    # Cor de cada área no card todo: cada card recebe a sua cor em --cor e o
+    # CSS_CARDS usa essa variável. Área lotada: cabeçalho amarelo.
+    cores = "".join(
+        f".st-key-area_{a['id']}{{--cor:{a['cor'] or COR_PADRAO}}}" for a in areas
+    ) + "".join(
+        f".st-key-area_{a['id']}{{{CSS_LOTADA}}}" for a in areas
+        if a["cap_carro"] + a["cap_moto"] - a["ocup_carro"] - a["ocup_moto"] <= 0
+    )
+    st.html(f"<style>{cores}</style>")
+
     for i, area in enumerate(areas):
         local_id = area["id"]
         cap_carro, cap_moto = area["cap_carro"], area["cap_moto"]
@@ -601,51 +726,49 @@ def painel_areas(evento_id: int):
         ocup_area = ocup_carro + ocup_moto
         sobrando = cap_area - ocup_area
 
-        # Barra de cor + bolinha da cor no título
-        cor = area["cor"] or COR_PADRAO
-        bolinha = emoji_da_cor(cor)
-        titulo = (f"{bolinha} {area['nome']}".strip()
-                  + f"  —  🚗 {ocup_carro}/{cap_carro}   🏍️ {ocup_moto}/{cap_moto}")
+        nome = texto_puro(area["nome"])
+        titulo = f"{nome}      🚗 {ocup_carro}/{cap_carro}    🏍️ {ocup_moto}/{cap_moto}"
+        if sobrando <= 0:
+            titulo = f"⛔ {nome} lotada      🚗 {ocup_carro}/{cap_carro}    🏍️ {ocup_moto}/{cap_moto}"
 
         # key fixa: sem ela o card fecha a cada clique, pois o título (contagem) muda
         with st.expander(titulo, expanded=(i == 0), key=f"area_{local_id}"):
-            st.markdown(
-                f"<div style='height:6px;border-radius:3px;background:{cor};margin:-4px 0 10px'></div>",
-                unsafe_allow_html=True,
-            )
-
             # ---- Motos ----
-            st.markdown(f"**🏍️ {ocup_moto:02d}/{cap_moto} motos**")
+            st.markdown(f"🏍️ Motos **{ocup_moto}**/{cap_moto}")
             with st.container(key=f"mov_moto_{local_id}"):
                 m1, m2 = st.columns(2)
                 m1.button(
-                    "➕ Entrada", key=f"mot_in_{local_id}", width="stretch",
+                    "Entrada", key=f"mot_in_{local_id}", width="stretch",
+                    type="primary", icon=":material/add:",
                     on_click=registrar, args=(TIPO_MOTO, local_id, "entrada", area["nome"]),
                 )
                 m2.button(
-                    "➖ Saída", key=f"mot_out_{local_id}", width="stretch",
+                    "Saída", key=f"mot_out_{local_id}", width="stretch",
+                    icon=":material/remove:",
                     on_click=registrar, args=(TIPO_MOTO, local_id, "saida", area["nome"]),
                 )
 
             # ---- Carros ----
-            st.markdown(f"**🚗 {ocup_carro:02d}/{cap_carro} carros**")
+            st.markdown(f"🚗 Carros **{ocup_carro}**/{cap_carro}")
             with st.container(key=f"mov_carro_{local_id}"):
                 c1b, c2b = st.columns(2)
                 c1b.button(
-                    "➕ Entrada", key=f"car_in_{local_id}", width="stretch",
+                    "Entrada", key=f"car_in_{local_id}", width="stretch",
+                    type="primary", icon=":material/add:",
                     on_click=registrar, args=(TIPO_CARRO, local_id, "entrada", area["nome"]),
                 )
                 c2b.button(
-                    "➖ Saída", key=f"car_out_{local_id}", width="stretch",
+                    "Saída", key=f"car_out_{local_id}", width="stretch",
+                    icon=":material/remove:",
                     on_click=registrar, args=(TIPO_CARRO, local_id, "saida", area["nome"]),
                 )
 
-            st.write(f"**Vagas sobrando: {sobrando}**")
+            st.markdown(f"Vagas livres na área: **{sobrando}**")
 
             # ---- Barras de ocupação ----
-            st.progress(pct(ocup_carro, cap_carro), text=f"% carros — {pct(ocup_carro, cap_carro)*100:.0f}%")
-            st.progress(pct(ocup_moto, cap_moto), text=f"% motos — {pct(ocup_moto, cap_moto)*100:.0f}%")
-            st.progress(pct(ocup_area, cap_area), text=f"% total — {pct(ocup_area, cap_area)*100:.0f}%")
+            st.progress(pct(ocup_carro, cap_carro), text=f"Carros: {pct(ocup_carro, cap_carro)*100:.0f}% ocupado")
+            st.progress(pct(ocup_moto, cap_moto), text=f"Motos: {pct(ocup_moto, cap_moto)*100:.0f}% ocupado")
+            st.progress(pct(ocup_area, cap_area), text=f"Área: {pct(ocup_area, cap_area)*100:.0f}% ocupada")
 
             # ---- Histórico recente da área (só consulta o banco se ligado) ----
             if st.toggle("Ver histórico", key=f"hist_{local_id}"):
@@ -683,7 +806,9 @@ if "aviso" in st.session_state:
 params = st.query_params
 if "evento" in params:
     evento_param = params["evento"]
-    if evento_param.isdigit():
+    # só números comuns e de tamanho razoável (ex.: "²" ou um número gigante
+    # vindos de um link quebrado derrubavam a página)
+    if re.fullmatch(r"[0-9]{1,9}", evento_param):
         tela_evento(int(evento_param))
     else:
         ir_para()

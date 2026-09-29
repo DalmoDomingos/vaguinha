@@ -9,8 +9,8 @@ TIPOS_VEICULO = {
     TIPO_MOTO: "Moto",
 }
 
-# Paleta oferecida ao escolher a cor de uma área: rótulo (com bolinha colorida,
-# que também aparece no título do card) -> cor em hex.
+# Paleta oferecida ao escolher a cor de uma área: rótulo (com bolinha colorida)
+# -> cor em hex. A cor pinta o card inteiro da área no painel.
 PALETA = {
     "🔵 Azul":     "#1f6f8b",
     "🟢 Verde":    "#2e6b3e",
@@ -31,12 +31,6 @@ def rotulo_da_cor(cor: str) -> str:
         if hexa.lower() == (cor or "").lower():
             return rotulo
     return cor or COR_PADRAO
-
-
-def emoji_da_cor(cor: str) -> str:
-    """Bolinha colorida para o título do card ('' se a cor não for da paleta)."""
-    rotulo = rotulo_da_cor(cor)
-    return rotulo.split(" ", 1)[0] if rotulo in PALETA else ""
 
 
 # Evento criado automaticamente quando o banco está vazio (e usado pelo
