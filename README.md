@@ -19,6 +19,10 @@ ocupados = Σ entradas − Σ saídas   (por área e por tipo de veículo)
   **carros** e **motos** — dá para renomear, incluir e excluir áreas e renomear
   o evento em "⚙️ Editar evento". (Área com veículos estacionados não pode ser
   excluída: dê saída antes.)
+- **Excluir evento** (em "⚙️ Editar evento"): apaga o evento e tudo dele (áreas
+  e todos os registros, inclusive os arquivados). Pede o nome do evento e a
+  senha dele; não dá para desfazer. Quem estava com o evento aberto em outro
+  aparelho vê "Evento não encontrado" e nada mais é registrado nele.
 - Botões de **entrada** e **saída** por tipo de veículo, respeitando a lotação.
 - Cada área aparece num **card na sua cor** (cabeçalho, fundo e barras). Entrada
   é o botão cheio e Saída o de contorno; área lotada fica com o cabeçalho **amarelo**.

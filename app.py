@@ -337,7 +337,11 @@ def registrar(evento_id: int, tipo_id: int, local_id: int, mov: str, nome_area: 
     # para quem registrou: cada operador tem a sua sessão.
     # senha trocada enquanto o evento estava aberto: não grava (o painel pede a nova)
     evento = repo.obter_evento(evento_id)
-    if evento is None or not evento_liberado(evento):
+    if evento is None:
+        st.session_state["aviso_painel"] = (
+            "Este evento foi excluído. Nada foi registrado.", "⚠️", AVISO_CURTO_SEGUNDOS)
+        return
+    if not evento_liberado(evento):
         st.session_state["aviso_painel"] = (
             "A senha do evento mudou. Digite a senha nova para continuar.", "🔒", AVISO_CURTO_SEGUNDOS)
         return
@@ -596,6 +600,7 @@ def secao_editar_evento(evento: dict, areas: list):
 
         secao_trocar_senha(evento_id)
         secao_zerar_evento(evento, versao)
+        secao_excluir_evento(evento)
 
 
 def secao_trocar_senha(evento_id: int):
@@ -647,6 +652,45 @@ def secao_zerar_evento(evento: dict, versao: int):
         st.session_state[f"versao_{evento_id}"] = versao + 1  # limpa a confirmação
         avisar(f"Evento zerado — {arquivados} registro(s) arquivado(s).", "🗑️")
         st.rerun()
+
+
+def secao_excluir_evento(evento: dict):
+    """Exclui o evento e tudo dele. Pede o nome do evento e a senha de novo."""
+    evento_id = evento["id"]
+    st.divider()
+    st.markdown("**❌ Excluir evento**")
+    st.caption(
+        "Apaga o evento **e tudo dele**: áreas, vagas e todos os registros de "
+        "entrada e saída, inclusive os arquivados. **Não dá para desfazer.**"
+    )
+    # formulário: nome e senha chegam juntos no toque do botão
+    with st.form(f"excluir_{evento_id}", clear_on_submit=True, border=False):
+        nome = st.text_input(
+            f"Digite o nome do evento: **{texto_puro(evento['nome'])}**", max_chars=80,
+        )
+        senha = st.text_input("Digite a senha do evento", type="password",
+                              max_chars=SENHA_MAX, autocomplete="current-password")
+        excluir = st.form_submit_button("Excluir evento para sempre", icon="❌")
+    if not excluir:
+        return
+    if nome.strip().casefold() != evento["nome"].strip().casefold():
+        st.error("O nome digitado não é o nome do evento. Nada foi excluído.")
+        return
+    chave = (evento_id, _aparelho())
+    espera = tentativas().espera(chave)
+    if espera:
+        st.error(f"Muitas tentativas com a senha errada. Tente de novo em {espera} s.")
+        return
+    if not repo.conferir_senha(evento_id, senha):
+        tentativas().errou(chave)
+        st.error("Senha incorreta. Nada foi excluído.")
+        return
+    tentativas().acertou(chave)
+    repo.excluir_evento(evento_id)
+    _liberados().pop(evento_id, None)
+    avisar(f"Evento “{texto_puro(evento['nome'])}” excluído.", "❌")
+    ir_para()
+    st.rerun()
 
 
 # Trava dos botões no navegador: ao tocar em Entrada/Saída, todos os botões de
@@ -720,6 +764,15 @@ TRAVA_JS = """
 ATUALIZAR_A_CADA = f"{int(ler_config('ATUALIZAR_A_CADA') or 5)}s"
 
 
+def _aparelho() -> str:
+    """Identifica o aparelho (IP) para contar as senhas erradas."""
+    try:
+        ip = st.context.ip_address
+    except Exception:
+        ip = None
+    return ip if isinstance(ip, str) and ip else "?"  # sem IP: todos contam juntos
+
+
 def tela_senha(evento: dict):
     """Pede a senha do evento (e controla as tentativas erradas)."""
     evento_id = evento["id"]
@@ -728,13 +781,7 @@ def tela_senha(evento: dict):
         st.warning("Este evento ainda não tem senha, por isso não pode ser aberto. "
                    "Avise o responsável pelo sistema.")
         return
-    try:
-        aparelho = st.context.ip_address
-    except Exception:
-        aparelho = None
-    if not isinstance(aparelho, str) or not aparelho:
-        aparelho = "?"  # sem IP conhecido: todos contam juntos (mais restritivo)
-    chave = (evento_id, aparelho)
+    chave = (evento_id, _aparelho())
     with st.form(f"entrar_{evento_id}", clear_on_submit=True):
         senha = st.text_input("Senha do evento", type="password", max_chars=SENHA_MAX,
                               autocomplete="current-password")
