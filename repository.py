@@ -332,6 +332,21 @@ class Repository(ABC):
                            (gerar_hash_senha(senha), e["id"]))
         return len(sem_senha)
 
+    def excluir_evento(self, evento_id: int) -> bool:
+        """
+        Exclui o evento e TUDO dele: áreas e todas as movimentações (inclusive
+        as arquivadas). Não tem volta. Retorna False se o evento não existia.
+        """
+        with self._transacao() as cur:
+            # registros em andamento nas áreas dele terminam antes (e os novos
+            # esperam e depois recebem "esta área não existe mais")
+            self._travar_areas_do_evento(cur, evento_id)
+            self._exec(cur, "DELETE FROM movimentacao WHERE local_id IN "
+                            "(SELECT id FROM local WHERE evento_id = ?)", (evento_id,))
+            self._exec(cur, "DELETE FROM local WHERE evento_id = ?", (evento_id,))
+            self._exec(cur, "DELETE FROM evento WHERE id = ?", (evento_id,))
+            return cur.rowcount > 0
+
     def zerar_evento(self, evento_id: int) -> int:
         """
         Zera a ocupação de todas as áreas do evento, mantendo áreas e vagas.
@@ -573,8 +588,10 @@ class PostgresRepository(Repository):
         # devolvida quando há mais que `minconn` paradas, por isso não é usado.)
         self._paradas: "queue.LifoQueue" = queue.LifoQueue()
         self._livres = threading.BoundedSemaphore(max_conexoes)
+        # banco novo: o schema.sql cria as tabelas e o evento inicial. (Não há
+        # _semear_se_vazio aqui: se todos os eventos forem excluídos, a Corrida
+        # da FAB não pode reaparecer sozinha ao reiniciar o app.)
         self._migrar_se_preciso()
-        self._semear_se_vazio()
 
     def _migrar_se_preciso(self) -> None:
         """
