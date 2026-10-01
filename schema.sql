@@ -88,6 +88,10 @@ END $$;
 -- não tinham a coluna)
 ALTER TABLE movimentacao ADD COLUMN IF NOT EXISTS arquivado_em TIMESTAMP;
 
+-- Senha do evento: só o hash (scrypt com sal), nunca a senha. Eventos antigos
+-- ficam sem senha até o app aplicar a SENHA_EVENTO_INICIAL dos secrets.
+ALTER TABLE evento ADD COLUMN IF NOT EXISTS senha_hash VARCHAR(200);
+
 CREATE INDEX IF NOT EXISTS idx_local_evento   ON local (evento_id);
 CREATE INDEX IF NOT EXISTS idx_mov_local_tipo ON movimentacao (local_id, tipo_veiculo_id);
 -- saldo lê só as movimentações ativas

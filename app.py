@@ -20,6 +20,7 @@ import importlib
 import os
 import re
 import sys
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -61,7 +62,7 @@ def _recarregar_modulos_alterados() -> str:
 VERSAO_BANCO = _recarregar_modulos_alterados()
 
 from config import COR_PADRAO, PALETA, TIPO_CARRO, TIPO_MOTO, rotulo_da_cor
-from repository import OperacaoInvalida, PostgresRepository, SQLiteRepository
+from repository import SENHA_MAX, SENHA_MIN, OperacaoInvalida, PostgresRepository, SQLiteRepository
 
 st.set_page_config(page_title="Lotação", page_icon="🅿️", layout="centered")
 
@@ -85,6 +86,10 @@ st.markdown(
           font-size: 1.25rem;
           font-weight: 600;
       }
+
+      /* Esconde a dica em inglês dentro dos campos ("Press Enter to apply" /
+         "Press Enter to submit form" e o contador de letras) */
+      [data-testid="InputInstructions"] { display: none; }
 
       /* Trava dos botões de entrada/saída (ver TRAVA_JS): enquanto um registro
          é processado, os botões não aceitam toque e o tocado mostra um círculo. */
@@ -172,8 +177,18 @@ def get_repo(versao: str):
     dsn = ler_config("DATABASE_URL")
     if dsn:
         # DB_MAX_CONEXOES (opcional): conexões simultâneas com o banco (padrão 15)
-        return PostgresRepository(dsn, max_conexoes=int(ler_config("DB_MAX_CONEXOES") or 15))
-    return SQLiteRepository(":memory:")
+        repo = PostgresRepository(dsn, max_conexoes=int(ler_config("DB_MAX_CONEXOES") or 15))
+    else:
+        repo = SQLiteRepository(":memory:")
+    # Eventos criados antes de existir senha (ex.: Corrida da FAB) recebem a
+    # SENHA_EVENTO_INICIAL dos secrets — nunca no código: o repositório é público.
+    senha_inicial = ler_config("SENHA_EVENTO_INICIAL")
+    if senha_inicial:
+        try:
+            repo.aplicar_senha_inicial(str(senha_inicial))
+        except OperacaoInvalida:
+            pass  # senha curta demais nos secrets: os eventos antigos seguem fechados
+    return repo
 
 
 repo = get_repo(VERSAO_BANCO)
@@ -224,6 +239,66 @@ def texto_puro(texto: str) -> str:
     return re.sub(r"^(\d+)([.)])|^([-+])", lambda m: (f"{m[1]}\\{m[2]}" if m[1] else f"\\{m[3]}"), texto)
 
 
+# ------------------------------------------------------------------
+# Senha dos eventos
+# ------------------------------------------------------------------
+class Tentativas:
+    """
+    Senhas erradas por (evento, aparelho): depois de LIVRES erros seguidos, o
+    login daquele aparelho naquele evento fica bloqueado por um tempo que dobra
+    a cada novo erro (até BLOQUEIO_MAX). Acertar zera a contagem.
+    """
+    LIVRES, BLOQUEIO_INICIAL, BLOQUEIO_MAX = 5, 30, 300
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._erros = {}  # chave -> (erros seguidos, bloqueado até, último erro)
+
+    def espera(self, chave) -> int:
+        """Segundos que ainda faltam de bloqueio (0 = pode tentar)."""
+        with self._lock:
+            _, ate, _ = self._erros.get(chave, (0, 0.0, 0.0))
+        return max(0, int(ate - time.monotonic() + 0.999))
+
+    def errou(self, chave) -> None:
+        agora = time.monotonic()
+        with self._lock:
+            if len(self._erros) > 10_000:  # limpa aparelhos parados há mais de 1 h
+                self._erros = {k: v for k, v in self._erros.items() if agora - v[2] < 3600}
+            n = self._erros.get(chave, (0, 0.0, 0.0))[0] + 1
+            ate = 0.0
+            if n >= self.LIVRES:
+                ate = agora + min(self.BLOQUEIO_MAX, self.BLOQUEIO_INICIAL * 2 ** (n - self.LIVRES))
+            self._erros[chave] = (n, ate, agora)
+
+    def acertou(self, chave) -> None:
+        with self._lock:
+            self._erros.pop(chave, None)
+
+
+@st.cache_resource
+def tentativas() -> Tentativas:
+    return Tentativas()  # uma só para o servidor: vale para todas as sessões
+
+
+def _liberados() -> dict:
+    """Eventos que esta sessão abriu com a senha: {evento_id: marca da senha}."""
+    return st.session_state.setdefault("eventos_liberados", {})
+
+
+def evento_liberado(evento: dict) -> bool:
+    """
+    Esta sessão digitou a senha ATUAL do evento? Se a senha foi trocada
+    depois, a marca não bate mais e a senha nova é pedida.
+    """
+    return bool(evento["tem_senha"]) and _liberados().get(evento["id"]) == evento["senha_marca"]
+
+
+def sair_do_evento(evento_id: int):
+    _liberados().pop(evento_id, None)
+    ir_para()
+
+
 def avisar(msg: str, icon: str = "✅"):
     """Guarda um aviso para mostrar depois do st.rerun()."""
     st.session_state["aviso"] = (msg, icon)
@@ -251,7 +326,7 @@ AVISO_CURTO_SEGUNDOS = 4
 AVISO_LONGO_SEGUNDOS = 10
 
 
-def registrar(tipo_id: int, local_id: int, mov: str, nome_area: str):
+def registrar(evento_id: int, tipo_id: int, local_id: int, mov: str, nome_area: str):
     """
     Registra o evento. A validação de saldo usa a capacidade e a ocupação
     ATUAIS do banco (não os valores da última renderização, que podem estar
@@ -260,6 +335,12 @@ def registrar(tipo_id: int, local_id: int, mov: str, nome_area: str):
     # Os avisos são mostrados pelo próprio painel (exibir elementos dentro de
     # um callback de fragmento não é suportado pelo Streamlit) e só aparecem
     # para quem registrou: cada operador tem a sua sessão.
+    # senha trocada enquanto o evento estava aberto: não grava (o painel pede a nova)
+    evento = repo.obter_evento(evento_id)
+    if evento is None or not evento_liberado(evento):
+        st.session_state["aviso_painel"] = (
+            "A senha do evento mudou. Digite a senha nova para continuar.", "🔒", AVISO_CURTO_SEGUNDOS)
+        return
     chave = (tipo_id, local_id, mov)
     anterior = st.session_state.get("ultimo_registro")  # (chave, quando foi o último toque)
     if anterior and anterior[0] == chave and time.monotonic() - anterior[1] < TOQUE_REPETIDO_SEGUNDOS:
@@ -388,23 +469,36 @@ def tela_inicial():
     for e in eventos:
         with st.container(border=True):
             info, acao = st.columns([4, 1], vertical_alignment="center")
-            info.markdown(f"#### {texto_puro(e['nome'])}")
-            info.caption(
-                f"{e['n_areas']} área(s) · {e['capacidade']} vagas · "
-                f"criado em {fmt_data(e['criado_em'])}"
-            )
+            info.markdown(f"#### 🔒 {texto_puro(e['nome'])}")
+            # ocupação e vagas só aparecem dentro do evento, para quem tem a senha
+            info.caption(f"{e['n_areas']} área(s) · criado em {fmt_data(e['criado_em'])}")
             acao.button(
-                "Abrir →", key=f"abrir_{e['id']}", type="primary", width="stretch",
+                "Abrir", key=f"abrir_{e['id']}", type="primary", width="stretch",
                 on_click=ir_para, kwargs={"evento": e["id"]},
             )
-            p = pct(e["ocupados"], e["capacidade"])
-            st.progress(p, text=f"Ocupação — {p*100:.1f}% ({e['ocupados']}/{e['capacidade']})")
 
 
 # ------------------------------------------------------------------
 # Tela de criação de evento
 # ------------------------------------------------------------------
+def _abrir_evento_criado(pedido: dict):
+    """Abre o evento que esta sessão acabou de criar (quem criou já entra)."""
+    evento_id = pedido["id"]
+    if evento_id not in _liberados():
+        _liberados()[evento_id] = repo.obter_evento(evento_id)["senha_marca"]
+    if not pedido.get("avisado"):
+        pedido["avisado"] = True
+        avisar(f"Evento “{texto_puro(pedido['nome'])}” criado!")
+    ir_para(evento=evento_id)
+    st.rerun()
+
+
 def tela_novo_evento():
+    # Toque repetido em "Criar evento" que chega depois do evento criado traz
+    # de volta esta tela: leva para o evento que acabou de ser criado.
+    pedido = st.session_state.get("criando_evento")
+    if pedido and pedido["id"] and time.monotonic() - pedido["quando"] < 10:
+        _abrir_evento_criado(pedido)
     st.button("← Voltar", on_click=ir_para)
     st.title("Novo evento")
 
@@ -423,7 +517,21 @@ def tela_novo_evento():
     total = sum(num(a["cap_carro"]) + num(a["cap_moto"]) for a in areas)
     st.caption(f"{len(areas)} área(s) · capacidade total: **{total}** vagas")
 
-    if st.button("Criar evento", type="primary", width="stretch"):
+    # Senha e botão num formulário: as duas senhas chegam juntas no toque do
+    # botão. Fora dele, a senha digitada às vezes ainda não tinha chegado ao
+    # servidor (ex.: Tab leva ao "olho" de mostrar a senha, dentro do campo).
+    with st.form("novo_evento_senha", border=False):
+        st.markdown("**Senha do evento**")
+        st.caption(f"Quem for registrar entradas e saídas vai precisar dela para abrir o "
+                   f"evento. Mínimo de {SENHA_MIN} caracteres.")
+        c_senha, c_repete = st.columns(2)
+        senha = c_senha.text_input("Senha", type="password", max_chars=SENHA_MAX,
+                                   key="novo_senha", autocomplete="new-password")
+        senha2 = c_repete.text_input("Repita a senha", type="password", max_chars=SENHA_MAX,
+                                     key="novo_senha2", autocomplete="new-password")
+        criar = st.form_submit_button("Criar evento", type="primary", width="stretch")
+
+    if criar:
         # Toque repetido (internet lenta): cada toque roda ao mesmo tempo que o
         # primeiro, que ainda está criando o evento — e criaria uma cópia dele.
         # O pedido é marcado ANTES de criar; os repetidos esperam e só abrem o evento.
@@ -434,12 +542,14 @@ def tela_novo_evento():
                     break
                 time.sleep(0.1)
             if pedido["id"]:
-                ir_para(evento=pedido["id"])
-                st.rerun()
+                _abrir_evento_criado(pedido)
+        if senha != senha2:
+            st.error("As duas senhas não são iguais. Digite a mesma senha nos dois campos.")
+            return
         pedido = {"nome": nome.strip(), "id": None, "quando": time.monotonic(), "falhou": False}
         st.session_state["criando_evento"] = pedido
         try:
-            evento_id = repo.criar_evento(nome, areas)
+            evento_id = repo.criar_evento(nome, areas, senha)
         except OperacaoInvalida as e:
             pedido["falhou"] = True
             st.error(str(e))
@@ -447,11 +557,13 @@ def tela_novo_evento():
         except Exception:
             pedido["falhou"] = True
             raise
+        # anota JÁ (antes de qualquer comando do Streamlit): um toque repetido
+        # pode interromper esta execução daqui em diante, e a próxima termina o serviço
         pedido["id"] = evento_id
         st.session_state.pop("novo_areas_linhas", None)  # descarta o rascunho
-        avisar(f"Evento “{texto_puro(nome.strip())}” criado!")
-        ir_para(evento=evento_id)
-        st.rerun()
+        for chave in ("novo_senha", "novo_senha2"):  # a senha não fica guardada na sessão
+            st.session_state.pop(chave, None)
+        _abrir_evento_criado(pedido)
 
 
 # ------------------------------------------------------------------
@@ -482,7 +594,34 @@ def secao_editar_evento(evento: dict, areas: list):
             avisar("Alterações salvas.")
             st.rerun()
 
+        secao_trocar_senha(evento_id)
         secao_zerar_evento(evento, versao)
+
+
+def secao_trocar_senha(evento_id: int):
+    st.divider()
+    st.markdown("**🔑 Trocar a senha do evento**")
+    st.caption("Quem estiver com o evento aberto em outro aparelho vai precisar "
+               "digitar a senha nova.")
+    with st.form(f"trocar_senha_{evento_id}", clear_on_submit=True, border=False):
+        c_nova, c_repete = st.columns(2)
+        nova = c_nova.text_input("Nova senha", type="password", max_chars=SENHA_MAX,
+                                 autocomplete="new-password")
+        nova2 = c_repete.text_input("Repita a nova senha", type="password", max_chars=SENHA_MAX,
+                                    autocomplete="new-password")
+        if not st.form_submit_button("Trocar senha"):
+            return
+    if nova != nova2:
+        st.error("As duas senhas não são iguais. Digite a mesma senha nos dois campos.")
+        return
+    try:
+        marca = repo.trocar_senha(evento_id, nova)
+    except OperacaoInvalida as e:
+        st.error(str(e))
+        return
+    _liberados()[evento_id] = marca  # quem trocou continua dentro
+    avisar("Senha trocada. Os outros aparelhos vão pedir a senha nova.")
+    st.rerun()
 
 
 def secao_zerar_evento(evento: dict, versao: int):
@@ -581,6 +720,41 @@ TRAVA_JS = """
 ATUALIZAR_A_CADA = f"{int(ler_config('ATUALIZAR_A_CADA') or 5)}s"
 
 
+def tela_senha(evento: dict):
+    """Pede a senha do evento (e controla as tentativas erradas)."""
+    evento_id = evento["id"]
+    st.caption("🔒 Este evento é protegido por senha.")
+    if not evento["tem_senha"]:
+        st.warning("Este evento ainda não tem senha, por isso não pode ser aberto. "
+                   "Avise o responsável pelo sistema.")
+        return
+    try:
+        aparelho = st.context.ip_address
+    except Exception:
+        aparelho = None
+    if not isinstance(aparelho, str) or not aparelho:
+        aparelho = "?"  # sem IP conhecido: todos contam juntos (mais restritivo)
+    chave = (evento_id, aparelho)
+    with st.form(f"entrar_{evento_id}", clear_on_submit=True):
+        senha = st.text_input("Senha do evento", type="password", max_chars=SENHA_MAX,
+                              autocomplete="current-password")
+        entrar = st.form_submit_button("Entrar", type="primary", width="stretch")
+    if not entrar:
+        return
+    espera = tentativas().espera(chave)
+    if espera:
+        st.error(f"Muitas tentativas com a senha errada. Tente de novo em {espera} s.")
+        return
+    marca = repo.conferir_senha(evento_id, senha)
+    if not marca:
+        tentativas().errou(chave)
+        st.error("Senha incorreta.")
+        return
+    tentativas().acertou(chave)
+    _liberados()[evento_id] = marca
+    st.rerun()
+
+
 def tela_evento(evento_id: int):
     evento = repo.obter_evento(evento_id)
     st.button("← Eventos", on_click=ir_para)
@@ -589,6 +763,9 @@ def tela_evento(evento_id: int):
         return
 
     st.markdown(f"<h1 style='text-align:center'>{html.escape(evento['nome'])}</h1>", unsafe_allow_html=True)
+    if not evento_liberado(evento):
+        tela_senha(evento)
+        return
     st.caption(f"Controle de vagas por área · Banco: {BANCO}")
 
     st.html(TRAVA_JS, unsafe_allow_javascript=True)
@@ -597,6 +774,9 @@ def tela_evento(evento_id: int):
     # no fim: operadores quase não usam, e o "zerar" fica longe de toques acidentais
     st.divider()
     secao_editar_evento(evento, repo.listar_areas(evento_id))
+    st.button("🔒 Sair deste evento", key=f"sair_{evento_id}",
+              on_click=sair_do_evento, args=(evento_id,),
+              help="Fecha o evento neste aparelho. Para abrir de novo, digite a senha.")
 
 
 # ---- Cor de cada área no card todo ----
@@ -679,6 +859,11 @@ def painel_areas(evento_id: int):
     Resumo + cards das áreas. É um fragmento: os cliques de entrada/saída e a
     atualização automática refazem só este trecho (1 consulta), não a página.
     """
+    # senha trocada em outro aparelho: volta para a tela de senha
+    evento = repo.obter_evento(evento_id)
+    if evento is None or not evento_liberado(evento):
+        st.rerun(scope="app")
+
     mostrar_aviso_painel()
 
     areas = repo.painel_evento(evento_id)  # áreas + ocupação, numa consulta só
@@ -740,12 +925,12 @@ def painel_areas(evento_id: int):
                 m1.button(
                     "Entrada", key=f"mot_in_{local_id}", width="stretch",
                     type="primary", icon=":material/add:",
-                    on_click=registrar, args=(TIPO_MOTO, local_id, "entrada", area["nome"]),
+                    on_click=registrar, args=(evento_id, TIPO_MOTO, local_id, "entrada", area["nome"]),
                 )
                 m2.button(
                     "Saída", key=f"mot_out_{local_id}", width="stretch",
                     icon=":material/remove:",
-                    on_click=registrar, args=(TIPO_MOTO, local_id, "saida", area["nome"]),
+                    on_click=registrar, args=(evento_id, TIPO_MOTO, local_id, "saida", area["nome"]),
                 )
 
             # ---- Carros ----
@@ -755,12 +940,12 @@ def painel_areas(evento_id: int):
                 c1b.button(
                     "Entrada", key=f"car_in_{local_id}", width="stretch",
                     type="primary", icon=":material/add:",
-                    on_click=registrar, args=(TIPO_CARRO, local_id, "entrada", area["nome"]),
+                    on_click=registrar, args=(evento_id, TIPO_CARRO, local_id, "entrada", area["nome"]),
                 )
                 c2b.button(
                     "Saída", key=f"car_out_{local_id}", width="stretch",
                     icon=":material/remove:",
-                    on_click=registrar, args=(TIPO_CARRO, local_id, "saida", area["nome"]),
+                    on_click=registrar, args=(evento_id, TIPO_CARRO, local_id, "saida", area["nome"]),
                 )
 
             st.markdown(f"Vagas livres na área: **{sobrando}**")

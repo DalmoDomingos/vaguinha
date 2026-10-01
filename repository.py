@@ -13,12 +13,18 @@ Toda a regra de ocupação é derivada do saldo:
 
 "Zerar" um evento não apaga nada: marca as movimentações com `arquivado_em`,
 e o saldo considera só as ativas (`arquivado_em IS NULL`).
+
+Senha dos eventos: o banco guarda só o hash (scrypt com sal aleatório) em
+`evento.senha_hash`; a senha em si não é gravada em lugar nenhum.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import math
 import queue
+import secrets
 import sqlite3
 import threading
 from abc import ABC, abstractmethod
@@ -62,6 +68,49 @@ def _validar_nome_evento(nome: str) -> str:
     return nome
 
 
+# ------------------------------------------------------------------
+# Senhas dos eventos
+# ------------------------------------------------------------------
+SENHA_MIN, SENHA_MAX = 6, 128
+# scrypt (16 MB de memória por cálculo): lento de propósito para quem tenta
+# adivinhar a senha, ~50 ms para quem a digita.
+_SCRYPT = {"n": 2 ** 14, "r": 8, "p": 1}
+
+
+def validar_senha_nova(senha: str) -> str:
+    senha = str(senha or "")
+    if len(senha) < SENHA_MIN:
+        raise OperacaoInvalida(f"A senha precisa ter pelo menos {SENHA_MIN} caracteres.")
+    if len(senha) > SENHA_MAX:
+        raise OperacaoInvalida(f"A senha pode ter no máximo {SENHA_MAX} caracteres.")
+    return senha
+
+
+def gerar_hash_senha(senha: str) -> str:
+    """Hash da senha para gravar no banco: scrypt$n$r$p$sal$hash (hex)."""
+    sal = secrets.token_bytes(16)
+    h = hashlib.scrypt(senha.encode("utf-8"), salt=sal, dklen=32, **_SCRYPT)
+    return f"scrypt${_SCRYPT['n']}${_SCRYPT['r']}${_SCRYPT['p']}${sal.hex()}${h.hex()}"
+
+
+def conferir_hash_senha(senha: str, guardado: Optional[str]) -> bool:
+    """A senha digitada confere com o hash guardado? (comparação em tempo constante)"""
+    try:
+        nome, n, r, p, sal, h = (guardado or "").split("$")
+        if nome != "scrypt":
+            return False
+        calculado = hashlib.scrypt(str(senha).encode("utf-8"), salt=bytes.fromhex(sal),
+                                   n=int(n), r=int(r), p=int(p), dklen=len(h) // 2)
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(calculado.hex(), h)
+
+
+def marca_da_senha(guardado: Optional[str]) -> Optional[str]:
+    """Identifica a senha atual sem revelá-la: muda quando a senha é trocada."""
+    return hashlib.sha256(guardado.encode()).hexdigest()[:16] if guardado else None
+
+
 def _inteiro(valor) -> int:
     """Converte valores vindos da tela (None, NaN, float) para int."""
     if valor is None or (isinstance(valor, float) and math.isnan(valor)):
@@ -97,6 +146,11 @@ def _normalizar_areas(areas: List[dict]) -> List[dict]:
     if not limpas:
         raise OperacaoInvalida("O evento precisa de pelo menos uma área.")
     return limpas
+
+
+# hash de uma senha qualquer: conferir contra ele gasta o mesmo tempo que uma
+# conferência de verdade (quem tenta adivinhar não descobre nada pelo tempo)
+_HASH_FALSO = gerar_hash_senha(secrets.token_hex(8))
 
 
 # ------------------------------------------------------------------
@@ -188,12 +242,15 @@ class Repository(ABC):
         return self._ler(consulta)
 
     def _semear_se_vazio(self) -> None:
-        """Cria o evento inicial (Corrida da FAB) se ainda não houver nenhum."""
+        """
+        Cria o evento inicial (Corrida da FAB) se ainda não houver nenhum. Ele
+        nasce sem senha: a senha vem dos secrets (ver aplicar_senha_inicial).
+        """
         if not self._todas("SELECT id FROM evento LIMIT 1"):
-            self.criar_evento(EVENTO_INICIAL, [
+            self._criar_evento(EVENTO_INICIAL, [
                 {"nome": n, "cap_carro": c, "cap_moto": m, "cor": cor}
                 for n, c, m, cor in AREAS_EVENTO_INICIAL
-            ])
+            ], senha_hash=None)
 
     # ---- eventos ----
     def listar_eventos(self) -> List[dict]:
@@ -205,14 +262,32 @@ class Repository(ABC):
         return eventos
 
     def obter_evento(self, evento_id: int) -> Optional[dict]:
-        rows = self._todas("SELECT id, nome, criado_em FROM evento WHERE id = ?", (evento_id,))
-        return rows[0] if rows else None
+        """
+        Evento com "tem_senha" e "senha_marca" (identifica a senha atual sem
+        revelá-la — muda quando a senha é trocada). O hash não sai daqui.
+        """
+        rows = self._todas("SELECT id, nome, criado_em, senha_hash FROM evento WHERE id = ?",
+                           (evento_id,))
+        if not rows:
+            return None
+        evento = rows[0]
+        guardado = evento.pop("senha_hash")
+        evento["tem_senha"] = bool(guardado)
+        evento["senha_marca"] = marca_da_senha(guardado)
+        return evento
 
-    def criar_evento(self, nome: str, areas: List[dict]) -> int:
+    def criar_evento(self, nome: str, areas: List[dict], senha: str) -> int:
+        """Cria o evento com as áreas e a senha (obrigatória)."""
+        # confere na ordem da tela: nome, áreas e por último a senha
+        _validar_nome_evento(nome), _normalizar_areas(areas)
+        senha_hash = gerar_hash_senha(validar_senha_nova(senha))
+        return self._criar_evento(nome, areas, senha_hash=senha_hash)
+
+    def _criar_evento(self, nome: str, areas: List[dict], senha_hash: Optional[str]) -> int:
         nome, areas = _validar_nome_evento(nome), _normalizar_areas(areas)
         with self._transacao() as cur:
-            self._exec(cur, f"INSERT INTO evento (nome, criado_em) VALUES (?, {self.AGORA}) "
-                            "RETURNING id", (nome,))
+            self._exec(cur, "INSERT INTO evento (nome, criado_em, senha_hash) "
+                            f"VALUES (?, {self.AGORA}, ?) RETURNING id", (nome, senha_hash))
             evento_id = int(cur.fetchone()[0])
             for ordem, a in enumerate(areas):
                 self._inserir_area(cur, evento_id, a, ordem)
@@ -222,6 +297,40 @@ class Repository(ABC):
         nome = _validar_nome_evento(nome)
         with self._transacao() as cur:
             self._exec(cur, "UPDATE evento SET nome = ? WHERE id = ?", (nome, evento_id))
+
+    # ---- senha ----
+    def conferir_senha(self, evento_id: int, senha: str) -> Optional[str]:
+        """
+        Confere a senha do evento. Retorna a marca da senha (ver obter_evento)
+        se estiver certa; None se errada, se o evento não existe ou não tem senha.
+        """
+        rows = self._todas("SELECT senha_hash FROM evento WHERE id = ?", (evento_id,))
+        guardado = rows[0]["senha_hash"] if rows else None
+        if not guardado:
+            conferir_hash_senha(senha, _HASH_FALSO)  # mesmo tempo de resposta
+            return None
+        return marca_da_senha(guardado) if conferir_hash_senha(senha, guardado) else None
+
+    def trocar_senha(self, evento_id: int, senha: str) -> str:
+        """Define a nova senha do evento. Retorna a marca dela."""
+        guardado = gerar_hash_senha(validar_senha_nova(senha))
+        with self._transacao() as cur:
+            self._exec(cur, "UPDATE evento SET senha_hash = ? WHERE id = ?", (guardado, evento_id))
+        return marca_da_senha(guardado)
+
+    def aplicar_senha_inicial(self, senha: str) -> int:
+        """
+        Dá a senha (vinda dos secrets) aos eventos que ainda não têm senha —
+        os criados antes de existir senha, como a Corrida da FAB. Eventos que já
+        têm senha não mudam. Retorna quantos eventos receberam a senha.
+        """
+        senha = validar_senha_nova(senha)
+        sem_senha = self._todas("SELECT id FROM evento WHERE senha_hash IS NULL")
+        with self._transacao() as cur:
+            for e in sem_senha:  # um hash (com sal próprio) por evento
+                self._exec(cur, "UPDATE evento SET senha_hash = ? WHERE id = ? AND senha_hash IS NULL",
+                           (gerar_hash_senha(senha), e["id"]))
+        return len(sem_senha)
 
     def zerar_evento(self, evento_id: int) -> int:
         """
@@ -390,8 +499,9 @@ class SQLiteRepository(Repository):
             PRAGMA foreign_keys = ON;
             CREATE TABLE IF NOT EXISTS evento (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
-                nome      TEXT NOT NULL,
-                criado_em TEXT NOT NULL
+                nome       TEXT NOT NULL,
+                criado_em  TEXT NOT NULL,
+                senha_hash TEXT
             );
             CREATE TABLE IF NOT EXISTS local (
                 id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -418,6 +528,8 @@ class SQLiteRepository(Repository):
         colunas = {r[1] for r in self.conn.execute("PRAGMA table_info(movimentacao)")}
         if "arquivado_em" not in colunas:  # arquivo SQLite de versão anterior
             self.conn.execute("ALTER TABLE movimentacao ADD COLUMN arquivado_em TEXT")
+        if "senha_hash" not in {r[1] for r in self.conn.execute("PRAGMA table_info(evento)")}:
+            self.conn.execute("ALTER TABLE evento ADD COLUMN senha_hash TEXT")
         self.conn.commit()
 
     @contextmanager
@@ -467,7 +579,7 @@ class PostgresRepository(Repository):
     def _migrar_se_preciso(self) -> None:
         """
         Aplica o schema.sql se o banco não está na versão atual (vazio, sem
-        eventos ou sem arquivamento). O script é idempotente e migra os dados.
+        eventos, sem arquivamento ou sem senha). O script é idempotente e migra os dados.
         """
         def atualizado(cur):
             cur.execute(
@@ -475,8 +587,9 @@ class PostgresRepository(Repository):
                 "  SELECT COUNT(*) FROM information_schema.columns"
                 "  WHERE table_schema = current_schema() AND ("
                 "    (table_name = 'local' AND column_name = 'evento_id') OR"
-                "    (table_name = 'movimentacao' AND column_name = 'arquivado_em'))"
-                ") = 2"
+                "    (table_name = 'movimentacao' AND column_name = 'arquivado_em') OR"
+                "    (table_name = 'evento' AND column_name = 'senha_hash'))"
+                ") = 3"
             )
             return cur.fetchone()[0]
 

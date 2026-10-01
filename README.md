@@ -11,8 +11,10 @@ ocupados = Σ entradas − Σ saídas   (por área e por tipo de veículo)
 
 ## Funcionalidades
 
-- **Tela inicial** com a lista de eventos (ocupação de cada um) e o botão
-  **Criar novo evento**. O evento "Corrida da FAB" já vem criado.
+- **Tela inicial** com a lista de eventos e o botão **Criar novo evento**. O
+  evento "Corrida da FAB" já vem criado.
+- **Cada evento tem senha**: para abrir é preciso digitá-la (veja
+  [Senha dos eventos](#senha-dos-eventos)).
 - Em cada evento: **quantas áreas quiser**, com **nome**, **cor** e vagas de
   **carros** e **motos** — dá para renomear, incluir e excluir áreas e renomear
   o evento em "⚙️ Editar evento". (Área com veículos estacionados não pode ser
@@ -22,6 +24,24 @@ ocupados = Σ entradas − Σ saídas   (por área e por tipo de veículo)
   é o botão cheio e Saída o de contorno; área lotada fica com o cabeçalho **amarelo**.
 - Barras de ocupação (% carros, % motos, % total) e vagas restantes.
 - Histórico de movimentações por área.
+
+## Senha dos eventos
+
+- Para abrir um evento é preciso a **senha dele**; sem ela não aparece nada do
+  evento (nem a ocupação na tela inicial). Ao **criar** um evento, a senha é
+  obrigatória (mínimo de 6 caracteres) e quem criou já entra.
+- A senha vale para o **aparelho/aba** onde foi digitada; recarregar a página
+  ou tocar em **🔒 Sair deste evento** pede a senha de novo.
+- **Trocar a senha**: em "⚙️ Editar evento". Os outros aparelhos que estavam com
+  o evento aberto passam a pedir a senha nova (e não registram mais nada antes).
+- **5 senhas erradas seguidas** bloqueiam novas tentativas daquele aparelho
+  por 30 s, depois 1 min, 2 min... (até 5 min).
+- O banco guarda **só um hash** da senha (scrypt com sal aleatório), nunca a
+  senha em si.
+- **Eventos criados antes da senha** (como a Corrida da FAB) recebem a senha
+  do secret **`SENHA_EVENTO_INICIAL`**. Ela fica nos *Secrets*, e não no código,
+  porque o repositório é público. Só vale para eventos ainda **sem** senha: se
+  a senha for trocada pelo app, ela continua valendo mesmo depois de reiniciar.
 
 ## Vários operadores ao mesmo tempo
 
@@ -112,8 +132,8 @@ O rodapé do título mostra qual banco está ativo (`PostgreSQL ✅` / `SQLite �
 
 | Branch    | Ambiente              | Banco Supabase   | Secrets do app                          |
 |-----------|-----------------------|------------------|-----------------------------------------|
-| `develop` | **Teste** (homologação) | projeto de teste | `DATABASE_URL` do teste + `AMBIENTE = "teste"` |
-| `main`    | **Produção**          | projeto real     | `DATABASE_URL` real (sem `AMBIENTE`)    |
+| `develop` | **Teste** (homologação) | projeto de teste | `DATABASE_URL` do teste + `AMBIENTE = "teste"` + `SENHA_EVENTO_INICIAL` |
+| `main`    | **Produção**          | projeto real     | `DATABASE_URL` real (sem `AMBIENTE`) + `SENHA_EVENTO_INICIAL` |
 
 Fluxo de trabalho:
 
