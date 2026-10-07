@@ -141,6 +141,23 @@ st.markdown(
           .st-key-resumo [data-testid="stMetricValue"] { font-size: 1.5rem; }
           .st-key-resumo [data-testid="stMetricLabel"] p { font-size: 0.85rem; }
       }
+
+      /* Rodapé com quem criou o app (ver rodape) */
+      .vg-rodape {
+          margin-top: 3rem; padding-top: 1rem;
+          border-top: 1px solid rgba(128, 128, 128, 0.25);
+          text-align: center; font-size: 0.85rem; opacity: 0.8;
+      }
+      .vg-rodape .vg-autores {
+          display: flex; justify-content: center; flex-wrap: wrap;
+          gap: 0.4rem 1.2rem; margin-top: 0.5rem;
+      }
+      .vg-rodape a {
+          display: inline-flex; align-items: center; gap: 0.4rem;
+          color: inherit !important; text-decoration: none;
+      }
+      .vg-rodape a:hover { text-decoration: underline; }
+      .vg-rodape img { width: 28px; height: 28px; border-radius: 50%; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -1106,6 +1123,25 @@ def painel_areas(evento_id: int):
 
 
 # ------------------------------------------------------------------
+# Rodapé
+# ------------------------------------------------------------------
+CRIADORES = (("Luiz Ragi", "LuizRagi"), ("Dalmo Domingos", "DalmoDomingos"))
+
+
+def rodape():
+    """Crédito de quem criou o app, com a foto e o link do GitHub de cada um."""
+    autores = "".join(
+        f'<a href="https://github.com/{usuario}" target="_blank" rel="noopener">'
+        f'<img src="https://github.com/{usuario}.png?size=56" alt="" loading="lazy">{html.escape(nome)}</a>'
+        for nome, usuario in CRIADORES
+    )
+    st.markdown(
+        f'<div class="vg-rodape">Criado por<div class="vg-autores">{autores}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ------------------------------------------------------------------
 # Roteamento
 # ------------------------------------------------------------------
 # código guardado no aparelho para o evento da URL (ver lembrar_aparelho)
@@ -1132,3 +1168,5 @@ elif params.get("tela") == "novo":
     tela_novo_evento()
 else:
     tela_inicial()
+
+rodape()
