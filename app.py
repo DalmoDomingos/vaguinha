@@ -931,6 +931,8 @@ CSS_CARDS = f"""
       background: var(--cor) !important; border-radius: 0 !important; }}
   {_CARD} summary, {_CARD} summary:hover, {_CARD} summary p {{ color: var(--texto-cor, #fff) !important; }}
   {_CARD} summary svg, {_CARD} summary [data-testid="stIconMaterial"] {{ color: var(--texto-cor, #fff) !important; }}
+  {_CARD} summary p {{ margin: 0 !important; line-height: 1.3; }}
+  {_CARD} summary p + p {{ font-size: 1.05rem !important; font-weight: 500 !important; margin-top: 0.3rem !important; }}
   {_CARD} [data-testid="stProgressBarTrack"] > div {{ background: var(--cor) !important; }}
   {_CARD} [data-testid="stBaseButton-primary"] {{
       background: var(--cor) !important; border: 2px solid var(--cor) !important; color: var(--texto-cor, #fff) !important; }}
@@ -1056,9 +1058,11 @@ def painel_areas(evento_id: int):
         sobrando = cap_area - ocup_area
 
         nome = texto_puro(area["nome"])
-        titulo = f"{nome}      🚗 {ocup_carro}/{cap_carro}    🏍️ {ocup_moto}/{cap_moto}"
+        # nome na 1ª linha, contagem na 2ª (o CSS_CARDS deixa a 2ª linha menor)
+        contagem = f"🚗 {ocup_carro}/{cap_carro}\u2003🏍️ {ocup_moto}/{cap_moto}"  # \u2003 = espaço largo
+        titulo = f"{nome}\n\n{contagem}"
         if sobrando <= 0:
-            titulo = f"⛔ {nome} lotada      🚗 {ocup_carro}/{cap_carro}    🏍️ {ocup_moto}/{cap_moto}"
+            titulo = f"⛔ {nome} lotada\n\n{contagem}"
 
         # key fixa: sem ela o card fecha a cada clique, pois o título (contagem) muda
         with st.expander(titulo, expanded=(i == 0), key=f"area_{local_id}"):
