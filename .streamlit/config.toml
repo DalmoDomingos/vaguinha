@@ -3,3 +3,9 @@
 # deixando a interface limpa para o usuário final.
 [client]
 toolbarMode = "minimal"
+
+[server]
+# Compacta as mensagens entre o servidor e o celular (a atualização dos cards a
+# cada 5 s, os registros...). O navegador descompacta sozinho; nada muda na
+# tela. Medido: ~50 MB → ~13 MB por hora de uso em cada celular.
+enableWebsocketCompression = true

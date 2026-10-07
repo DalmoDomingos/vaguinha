@@ -156,9 +156,6 @@ def ler_config(nome: str):
     return valor or os.environ.get(nome)
 
 
-# "teste" no app de homologação (branch develop); ausente/"producao" no app real.
-AMBIENTE = (ler_config("AMBIENTE") or "producao").strip().lower()
-
 
 # ------------------------------------------------------------------
 # Repositório (único, mantido entre reruns do Streamlit)
@@ -192,8 +189,6 @@ def get_repo(versao: str):
 
 
 repo = get_repo(VERSAO_BANCO)
-usando_pg = isinstance(repo, PostgresRepository)
-BANCO = "PostgreSQL ✅" if usando_pg else "SQLite (memória) ⚠️"
 
 
 # ------------------------------------------------------------------
@@ -459,7 +454,7 @@ def editor_areas(areas: list, key: str) -> list:
 # ------------------------------------------------------------------
 def tela_inicial():
     st.markdown("<h1 style='text-align:center'>Lotação</h1>", unsafe_allow_html=True)
-    st.caption(f"Controle de vagas por evento · Banco: {BANCO}")
+    st.caption("Controle de vagas por evento")
 
     st.button(
         "➕ Criar novo evento", type="primary", width="stretch",
@@ -813,7 +808,7 @@ def tela_evento(evento_id: int):
     if not evento_liberado(evento):
         tela_senha(evento)
         return
-    st.caption(f"Controle de vagas por área · Banco: {BANCO}")
+    st.caption("Controle de vagas por área")
 
     st.html(TRAVA_JS, unsafe_allow_javascript=True)
     st.html(f"<style>{CSS_CARDS}{CSS_AVISO}</style>")
@@ -918,14 +913,18 @@ def painel_areas(evento_id: int):
     # ---- Resumo geral ----
     tot_carros = sum(a["ocup_carro"] for a in areas)
     tot_motos = sum(a["ocup_moto"] for a in areas)
+    # vagas livres por tipo (área com mais veículos que vagas não conta negativo)
+    livres_carro = sum(max(0, a["cap_carro"] - a["ocup_carro"]) for a in areas)
+    livres_moto = sum(max(0, a["cap_moto"] - a["ocup_moto"]) for a in areas)
     cap_total = sum(a["cap_carro"] + a["cap_moto"] for a in areas)
     ocup_total = tot_carros + tot_motos
 
     with st.container(key="resumo"):
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Carros", tot_carros)
-        c2.metric("Motos", tot_motos)
-        c3.metric("Vagas livres", cap_total - ocup_total)
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("🚗 Carros", tot_carros)
+        c2.metric("🏍️ Motos", tot_motos)
+        c3.metric("Livres 🚗", livres_carro)
+        c4.metric("Livres 🏍️", livres_moto)
 
     st.caption(
         f"Capacidade total configurada: **{cap_total}** vagas · "
@@ -995,7 +994,10 @@ def painel_areas(evento_id: int):
                     on_click=registrar, args=(evento_id, TIPO_CARRO, local_id, "saida", area["nome"]),
                 )
 
-            st.markdown(f"Vagas livres na área: **{sobrando}**")
+            st.markdown(
+                f"Vagas livres: 🚗 **{max(0, cap_carro - ocup_carro)}** · "
+                f"🏍️ **{max(0, cap_moto - ocup_moto)}**"
+            )
 
             # ---- Barras de ocupação ----
             st.progress(pct(ocup_carro, cap_carro), text=f"Carros: {pct(ocup_carro, cap_carro)*100:.0f}% ocupado")
@@ -1025,12 +1027,6 @@ def painel_areas(evento_id: int):
 # ------------------------------------------------------------------
 # Roteamento
 # ------------------------------------------------------------------
-if AMBIENTE == "teste":
-    st.warning(
-        "**⚠️ AMBIENTE DE TESTE** — os dados daqui não são reais. "
-        "Não use este app para registrar veículos no evento.",
-    )
-
 if "aviso" in st.session_state:
     msg, icon = st.session_state.pop("aviso")
     st.toast(msg, icon=icon)

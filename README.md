@@ -58,6 +58,9 @@ tempo** (testado com 100 operadores simultâneos: ~0,2 s por clique):
 - Os **cards se atualizam sozinhos** a cada 5 s (`ATUALIZAR_A_CADA`) para cada
   operador ver o que os outros registraram; os cliques atualizam só os cards.
 - O histórico de uma área só é consultado quando alguém liga **Ver histórico**.
+- **Compressão** das mensagens entre o servidor e os celulares
+  (`.streamlit/config.toml`): cerca de **13 MB por hora** de uso em cada celular,
+  em vez de ~50 MB.
 - **Trava contra toque duplo**: ao tocar em Entrada/Saída, os botões ficam
   travados (o tocado mostra um círculo girando) até o registro terminar, e um
   pop-up rápido confirma — só para quem registrou (ex.: "✅ 🚗 Carro entrou —
@@ -136,17 +139,14 @@ O rodapé do título mostra qual banco está ativo (`PostgreSQL ✅` / `SQLite �
 
 | Branch    | Ambiente              | Banco Supabase   | Secrets do app                          |
 |-----------|-----------------------|------------------|-----------------------------------------|
-| `develop` | **Teste** (homologação) | projeto de teste | `DATABASE_URL` do teste + `AMBIENTE = "teste"` + `SENHA_EVENTO_INICIAL` |
-| `main`    | **Produção**          | projeto real     | `DATABASE_URL` real (sem `AMBIENTE`) + `SENHA_EVENTO_INICIAL` |
+| `develop` | **Teste** (homologação) | projeto de teste | `DATABASE_URL` do teste + `SENHA_EVENTO_INICIAL` |
+| `main`    | **Produção**          | projeto real     | `DATABASE_URL` real + `SENHA_EVENTO_INICIAL` |
 
 Fluxo de trabalho:
 
 1. Crie uma branch a partir da `develop` (ex.: `feat/minha-mudanca`).
 2. Abra o PR para a **`develop`** → o app de teste atualiza → testem lá.
 3. Tudo certo? Abra um PR de **`develop` → `main`** para levar à produção.
-
-Com `AMBIENTE = "teste"` o app mostra uma faixa **⚠️ AMBIENTE DE TESTE** no topo,
-para ninguém registrar veículos reais no app errado.
 
 ## Tecnologias
 
