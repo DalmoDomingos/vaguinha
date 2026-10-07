@@ -36,7 +36,8 @@ ocupados = Σ entradas − Σ saídas   (por área e por tipo de veículo)
   obrigatória (mínimo de 6 caracteres) e quem criou já entra.
 - Depois da senha certa, o **aparelho fica lembrado por 12 horas**: recarregar a
   página ou bloquear o celular não pede a senha de novo. O aparelho guarda só um
-  código aleatório (cookie); o banco guarda só o hash desse código. Tocar em
+  código aleatório (no armazenamento do navegador — cookies não chegam ao app
+  no Streamlit Cloud); o banco guarda só o hash desse código. Tocar em
   **🔒 Sair deste evento** esquece o aparelho; **trocar a senha** esquece todos.
 - **Trocar a senha**: em "⚙️ Editar evento". Os outros aparelhos que estavam com
   o evento aberto passam a pedir a senha nova (e não registram mais nada antes).
