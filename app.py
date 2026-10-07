@@ -25,6 +25,7 @@ import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 import streamlit as st
 
@@ -62,7 +63,8 @@ def _recarregar_modulos_alterados() -> str:
 VERSAO_BANCO = _recarregar_modulos_alterados()
 
 from config import COR_PADRAO, PALETA, TIPO_CARRO, TIPO_MOTO, rotulo_da_cor
-from repository import SENHA_MAX, SENHA_MIN, OperacaoInvalida, PostgresRepository, SQLiteRepository
+from repository import (ACESSO_HORAS, SENHA_MAX, SENHA_MIN, OperacaoInvalida,
+                        PostgresRepository, SQLiteRepository)
 
 st.set_page_config(page_title="Lotação", page_icon="🅿️", layout="centered")
 
@@ -289,8 +291,62 @@ def evento_liberado(evento: dict) -> bool:
     return bool(evento["tem_senha"]) and _liberados().get(evento["id"]) == evento["senha_marca"]
 
 
+# ---- aparelho lembrado: cookie com um código aleatório (ver repo.criar_acesso) ----
+def _nome_cookie(evento_id: int) -> str:
+    return f"vg_acesso_{int(evento_id)}"
+
+
+def _cookie(nome: str) -> Optional[str]:
+    """Cookie que o aparelho mandou ao abrir a página (None se não tem)."""
+    try:
+        valor = st.context.cookies.get(nome)
+    except Exception:
+        return None
+    return valor if isinstance(valor, str) else None
+
+
+def _gravar_cookie(nome: str, valor: str, segundos: int):
+    """O cookie é gravado no aparelho pelo script de cookies_js() desta sessão."""
+    st.session_state.setdefault("cookies_pendentes", {})[nome] = (valor, int(segundos))
+
+
+def cookies_js():
+    """Grava no aparelho os cookies pendentes desta sessão (via script na página)."""
+    pendentes = st.session_state.get("cookies_pendentes")
+    if not pendentes:
+        return
+    comandos = "".join(
+        f'document.cookie = "{nome}={valor}; Max-Age={segundos}; Path=/; SameSite=Lax"'
+        f' + (location.protocol === "https:" ? "; Secure" : "");'
+        for nome, (valor, segundos) in pendentes.items()
+        if re.fullmatch(r"[A-Za-z0-9_\-]*", nome + valor)  # só caracteres seguros
+    )
+    st.html(f"<script>{comandos}</script>", unsafe_allow_javascript=True)
+
+
+def liberar_aparelho(evento_id: int, marca: str):
+    """Libera o evento nesta sessão e lembra o aparelho por ACESSO_HORAS."""
+    _liberados()[evento_id] = marca
+    codigo = repo.criar_acesso(evento_id, marca)
+    st.session_state.setdefault("codigos_acesso", {})[evento_id] = codigo
+    _gravar_cookie(_nome_cookie(evento_id), codigo, ACESSO_HORAS * 3600)
+
+
+def lembrar_aparelho(evento: dict) -> bool:
+    """O aparelho tem um código válido para o evento (de antes de recarregar/bloquear)?"""
+    marca = repo.conferir_acesso(evento["id"], _cookie(_nome_cookie(evento["id"])))
+    if marca and marca == evento["senha_marca"]:
+        _liberados()[evento["id"]] = marca
+        return True
+    return False
+
+
 def sair_do_evento(evento_id: int):
+    """Fecha o evento neste aparelho e esquece o código dele."""
     _liberados().pop(evento_id, None)
+    codigo = st.session_state.get("codigos_acesso", {}).pop(evento_id, None)
+    repo.apagar_acesso(codigo or _cookie(_nome_cookie(evento_id)))
+    _gravar_cookie(_nome_cookie(evento_id), "", 0)
     ir_para()
 
 
@@ -484,7 +540,7 @@ def _abrir_evento_criado(pedido: dict):
     """Abre o evento que esta sessão acabou de criar (quem criou já entra)."""
     evento_id = pedido["id"]
     if evento_id not in _liberados():
-        _liberados()[evento_id] = repo.obter_evento(evento_id)["senha_marca"]
+        liberar_aparelho(evento_id, repo.obter_evento(evento_id)["senha_marca"])
     if not pedido.get("avisado"):
         pedido["avisado"] = True
         avisar(f"Evento “{texto_puro(pedido['nome'])}” criado!")
@@ -619,7 +675,7 @@ def secao_trocar_senha(evento_id: int):
     except OperacaoInvalida as e:
         st.error(str(e))
         return
-    _liberados()[evento_id] = marca  # quem trocou continua dentro
+    liberar_aparelho(evento_id, marca)  # quem trocou continua dentro (e lembrado)
     avisar("Senha trocada. Os outros aparelhos vão pedir a senha nova.")
     st.rerun()
 
@@ -793,7 +849,7 @@ def tela_senha(evento: dict):
         st.error("Senha incorreta.")
         return
     tentativas().acertou(chave)
-    _liberados()[evento_id] = marca
+    liberar_aparelho(evento_id, marca)
     st.rerun()
 
 
@@ -805,7 +861,7 @@ def tela_evento(evento_id: int):
         return
 
     st.markdown(f"<h1 style='text-align:center'>{html.escape(evento['nome'])}</h1>", unsafe_allow_html=True)
-    if not evento_liberado(evento):
+    if not evento_liberado(evento) and not lembrar_aparelho(evento):
         tela_senha(evento)
         return
     st.caption("Controle de vagas por área")
@@ -1027,6 +1083,8 @@ def painel_areas(evento_id: int):
 # ------------------------------------------------------------------
 # Roteamento
 # ------------------------------------------------------------------
+cookies_js()
+
 if "aviso" in st.session_state:
     msg, icon = st.session_state.pop("aviso")
     st.toast(msg, icon=icon)

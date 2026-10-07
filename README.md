@@ -34,8 +34,10 @@ ocupados = Σ entradas − Σ saídas   (por área e por tipo de veículo)
 - Para abrir um evento é preciso a **senha dele**; sem ela não aparece nada do
   evento (nem a ocupação na tela inicial). Ao **criar** um evento, a senha é
   obrigatória (mínimo de 6 caracteres) e quem criou já entra.
-- A senha vale para o **aparelho/aba** onde foi digitada; recarregar a página
-  ou tocar em **🔒 Sair deste evento** pede a senha de novo.
+- Depois da senha certa, o **aparelho fica lembrado por 12 horas**: recarregar a
+  página ou bloquear o celular não pede a senha de novo. O aparelho guarda só um
+  código aleatório (cookie); o banco guarda só o hash desse código. Tocar em
+  **🔒 Sair deste evento** esquece o aparelho; **trocar a senha** esquece todos.
 - **Trocar a senha**: em "⚙️ Editar evento". Os outros aparelhos que estavam com
   o evento aberto passam a pedir a senha nova (e não registram mais nada antes).
 - **5 senhas erradas seguidas** bloqueiam novas tentativas daquele aparelho
