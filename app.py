@@ -89,6 +89,12 @@ st.markdown(
           font-weight: 600;
       }
 
+      /* Componente invisível que guarda o acesso no aparelho (armazenamento_do_aparelho) */
+      .st-key-armazem, [data-testid="stLayoutWrapper"]:has(> .st-key-armazem) {
+          position: absolute !important; height: 0 !important; overflow: hidden;
+          margin: 0 !important; padding: 0 !important;
+      }
+
       /* Esconde a dica em inglês dentro dos campos ("Press Enter to apply" /
          "Press Enter to submit form" e o contador de letras) */
       [data-testid="InputInstructions"] { display: none; }
@@ -291,37 +297,49 @@ def evento_liberado(evento: dict) -> bool:
     return bool(evento["tem_senha"]) and _liberados().get(evento["id"]) == evento["senha_marca"]
 
 
-# ---- aparelho lembrado: cookie com um código aleatório (ver repo.criar_acesso) ----
-def _nome_cookie(evento_id: int) -> str:
+# ---- aparelho lembrado: código aleatório guardado no navegador ----
+# O código (ver repo.criar_acesso) fica no localStorage do aparelho. Não dá para
+# usar cookie: o Streamlit Community Cloud não repassa os cookies ao app
+# (st.context.cookies chega vazio). Este componente lê/grava/apaga o código no
+# navegador e devolve o que leu ao Python (uma execução extra ao abrir a página).
+_ARMAZEM_JS = """
+export default function(component) {
+  const { data, setStateValue } = component;
+  const d = data || {};
+  for (const [k, v] of Object.entries(d.gravar || {})) { try { localStorage.setItem(k, v); } catch (e) {} }
+  for (const k of (d.apagar || [])) { try { localStorage.removeItem(k); } catch (e) {} }
+  const lidos = {};
+  for (const k of (d.ler || [])) { try { lidos[k] = localStorage.getItem(k) || ""; } catch (e) { lidos[k] = ""; } }
+  const json = JSON.stringify(lidos);
+  if (window.__vgLidos !== json) { window.__vgLidos = json; setStateValue("lidos", lidos); }
+}
+"""
+_armazem = st.components.v2.component("vg_armazenamento", js=_ARMAZEM_JS)
+
+
+def _chave_acesso(evento_id: int) -> str:
     return f"vg_acesso_{int(evento_id)}"
 
 
-def _cookie(nome: str) -> Optional[str]:
-    """Cookie que o aparelho mandou ao abrir a página (None se não tem)."""
-    try:
-        valor = st.context.cookies.get(nome)
-    except Exception:
-        return None
-    return valor if isinstance(valor, str) else None
+def _ops_armazem() -> dict:
+    return st.session_state.setdefault("armazem_ops", {"gravar": {}, "apagar": []})
 
 
-def _gravar_cookie(nome: str, valor: str, segundos: int):
-    """O cookie é gravado no aparelho pelo script de cookies_js() desta sessão."""
-    st.session_state.setdefault("cookies_pendentes", {})[nome] = (valor, int(segundos))
+def armazenamento_do_aparelho(ler: list):
+    """Monta o componente (invisível): aplica gravações/remoções e lê as chaves pedidas."""
+    ops = _ops_armazem()
+    with st.container(key="armazem"):
+        r = _armazem(key="vg_armazenamento",
+                     data={"ler": ler, "gravar": ops["gravar"], "apagar": ops["apagar"]},
+                     on_lidos_change=lambda: None)
+    lidos = getattr(r, "lidos", None)
+    st.session_state["armazem_lidos"] = lidos if isinstance(lidos, dict) else {}
 
 
-def cookies_js():
-    """Grava no aparelho os cookies pendentes desta sessão (via script na página)."""
-    pendentes = st.session_state.get("cookies_pendentes")
-    if not pendentes:
-        return
-    comandos = "".join(
-        f'document.cookie = "{nome}={valor}; Max-Age={segundos}; Path=/; SameSite=Lax"'
-        f' + (location.protocol === "https:" ? "; Secure" : "");'
-        for nome, (valor, segundos) in pendentes.items()
-        if re.fullmatch(r"[A-Za-z0-9_\-]*", nome + valor)  # só caracteres seguros
-    )
-    st.html(f"<script>{comandos}</script>", unsafe_allow_javascript=True)
+def _codigo_guardado(evento_id: int) -> Optional[str]:
+    """Código que o navegador tinha guardado para o evento (lido nesta execução)."""
+    valor = st.session_state.get("armazem_lidos", {}).get(_chave_acesso(evento_id))
+    return valor if isinstance(valor, str) and valor else None
 
 
 def liberar_aparelho(evento_id: int, marca: str):
@@ -329,14 +347,18 @@ def liberar_aparelho(evento_id: int, marca: str):
     _liberados()[evento_id] = marca
     codigo = repo.criar_acesso(evento_id, marca)
     st.session_state.setdefault("codigos_acesso", {})[evento_id] = codigo
-    _gravar_cookie(_nome_cookie(evento_id), codigo, ACESSO_HORAS * 3600)
+    ops = _ops_armazem()
+    ops["gravar"][_chave_acesso(evento_id)] = codigo
+    if _chave_acesso(evento_id) in ops["apagar"]:
+        ops["apagar"].remove(_chave_acesso(evento_id))
 
 
 def lembrar_aparelho(evento: dict) -> bool:
     """O aparelho tem um código válido para o evento (de antes de recarregar/bloquear)?"""
-    marca = repo.conferir_acesso(evento["id"], _cookie(_nome_cookie(evento["id"])))
+    marca = repo.conferir_acesso(evento["id"], _codigo_guardado(evento["id"]))
     if marca and marca == evento["senha_marca"]:
         _liberados()[evento["id"]] = marca
+        st.session_state.setdefault("codigos_acesso", {})[evento["id"]] = _codigo_guardado(evento["id"])
         return True
     return False
 
@@ -345,8 +367,11 @@ def sair_do_evento(evento_id: int):
     """Fecha o evento neste aparelho e esquece o código dele."""
     _liberados().pop(evento_id, None)
     codigo = st.session_state.get("codigos_acesso", {}).pop(evento_id, None)
-    repo.apagar_acesso(codigo or _cookie(_nome_cookie(evento_id)))
-    _gravar_cookie(_nome_cookie(evento_id), "", 0)
+    repo.apagar_acesso(codigo or _codigo_guardado(evento_id))
+    ops = _ops_armazem()
+    ops["gravar"].pop(_chave_acesso(evento_id), None)
+    if _chave_acesso(evento_id) not in ops["apagar"]:
+        ops["apagar"].append(_chave_acesso(evento_id))
     ir_para()
 
 
@@ -1083,7 +1108,11 @@ def painel_areas(evento_id: int):
 # ------------------------------------------------------------------
 # Roteamento
 # ------------------------------------------------------------------
-cookies_js()
+# código guardado no aparelho para o evento da URL (ver lembrar_aparelho)
+_evento_url = st.query_params.get("evento", "")
+armazenamento_do_aparelho(
+    [_chave_acesso(int(_evento_url))] if re.fullmatch(r"[0-9]{1,9}", _evento_url) else []
+)
 
 if "aviso" in st.session_state:
     msg, icon = st.session_state.pop("aviso")
