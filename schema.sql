@@ -92,6 +92,16 @@ ALTER TABLE movimentacao ADD COLUMN IF NOT EXISTS arquivado_em TIMESTAMP;
 -- ficam sem senha até o app aplicar a SENHA_EVENTO_INICIAL dos secrets.
 ALTER TABLE evento ADD COLUMN IF NOT EXISTS senha_hash VARCHAR(200);
 
+-- Aparelhos lembrados depois da senha certa: só o SHA-256 do código que fica
+-- no aparelho, a marca da senha (trocar a senha invalida) e a validade (epoch).
+CREATE TABLE IF NOT EXISTS acesso (
+    token_hash  CHAR(64)    PRIMARY KEY,
+    evento_id   INTEGER     NOT NULL REFERENCES evento(id) ON DELETE CASCADE,
+    senha_marca VARCHAR(16) NOT NULL,
+    expira_em   BIGINT      NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_acesso_evento ON acesso (evento_id);
+
 CREATE INDEX IF NOT EXISTS idx_local_evento   ON local (evento_id);
 CREATE INDEX IF NOT EXISTS idx_mov_local_tipo ON movimentacao (local_id, tipo_veiculo_id);
 -- saldo lê só as movimentações ativas
@@ -133,6 +143,7 @@ ALTER TABLE tipo_veiculo ENABLE ROW LEVEL SECURITY;
 ALTER TABLE evento       ENABLE ROW LEVEL SECURITY;
 ALTER TABLE local        ENABLE ROW LEVEL SECURITY;
 ALTER TABLE movimentacao ENABLE ROW LEVEL SECURITY;
+ALTER TABLE acesso       ENABLE ROW LEVEL SECURITY;
 
 -- ============================================================
 -- View de saldo atual (ocupação = entradas - saídas) por evento e área,

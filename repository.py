@@ -16,6 +16,10 @@ e o saldo considera só as ativas (`arquivado_em IS NULL`).
 
 Senha dos eventos: o banco guarda só o hash (scrypt com sal aleatório) em
 `evento.senha_hash`; a senha em si não é gravada em lugar nenhum.
+
+Acesso lembrado no aparelho: depois da senha certa, o aparelho recebe um código
+aleatório (cookie); a tabela `acesso` guarda só o SHA-256 dele, o evento, a
+marca da senha e a validade. Trocar a senha ou sair invalida o código.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ import queue
 import secrets
 import sqlite3
 import threading
+import time
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from pathlib import Path
@@ -104,6 +109,14 @@ def conferir_hash_senha(senha: str, guardado: Optional[str]) -> bool:
     except (ValueError, TypeError):
         return False
     return hmac.compare_digest(calculado.hex(), h)
+
+
+# Por quanto tempo o aparelho fica lembrado depois da senha certa (um dia de evento)
+ACESSO_HORAS = 12
+
+
+def _hash_codigo(codigo: str) -> str:
+    return hashlib.sha256(str(codigo).encode("utf-8")).hexdigest()
 
 
 def marca_da_senha(guardado: Optional[str]) -> Optional[str]:
@@ -312,11 +325,50 @@ class Repository(ABC):
         return marca_da_senha(guardado) if conferir_hash_senha(senha, guardado) else None
 
     def trocar_senha(self, evento_id: int, senha: str) -> str:
-        """Define a nova senha do evento. Retorna a marca dela."""
+        """Define a nova senha do evento (e esquece os aparelhos lembrados). Retorna a marca dela."""
         guardado = gerar_hash_senha(validar_senha_nova(senha))
         with self._transacao() as cur:
             self._exec(cur, "UPDATE evento SET senha_hash = ? WHERE id = ?", (guardado, evento_id))
+            self._exec(cur, "DELETE FROM acesso WHERE evento_id = ?", (evento_id,))
         return marca_da_senha(guardado)
+
+    # ---- aparelho lembrado (depois da senha certa) ----
+    def criar_acesso(self, evento_id: int, senha_marca: str) -> str:
+        """
+        Gera o código que deixa o aparelho lembrado por ACESSO_HORAS. Devolve o
+        código (vai para o cookie do aparelho); o banco guarda só o hash dele.
+        """
+        codigo = secrets.token_urlsafe(32)
+        agora = int(time.time())
+        with self._transacao() as cur:
+            self._exec(cur, "DELETE FROM acesso WHERE expira_em < ?", (agora,))  # limpa os vencidos
+            self._exec(cur, "INSERT INTO acesso (token_hash, evento_id, senha_marca, expira_em) "
+                            "VALUES (?, ?, ?, ?)",
+                       (_hash_codigo(codigo), evento_id, senha_marca, agora + ACESSO_HORAS * 3600))
+        return codigo
+
+    def conferir_acesso(self, evento_id: int, codigo: Optional[str]) -> Optional[str]:
+        """
+        O código do aparelho vale para este evento? Devolve a marca da senha
+        atual se sim; None se não existe, venceu ou a senha foi trocada depois.
+        """
+        if not codigo or not isinstance(codigo, str) or len(codigo) > 100:
+            return None
+        rows = self._todas(
+            "SELECT a.senha_marca, a.expira_em, e.senha_hash FROM acesso a "
+            "JOIN evento e ON e.id = a.evento_id WHERE a.token_hash = ? AND a.evento_id = ?",
+            (_hash_codigo(codigo), evento_id),
+        )
+        if not rows or int(rows[0]["expira_em"]) < time.time():
+            return None
+        atual = marca_da_senha(rows[0]["senha_hash"])
+        return atual if atual and hmac.compare_digest(atual, rows[0]["senha_marca"]) else None
+
+    def apagar_acesso(self, codigo: Optional[str]) -> None:
+        """Esquece este aparelho (botão Sair)."""
+        if codigo and isinstance(codigo, str):
+            with self._transacao() as cur:
+                self._exec(cur, "DELETE FROM acesso WHERE token_hash = ?", (_hash_codigo(codigo),))
 
     def aplicar_senha_inicial(self, senha: str) -> int:
         """
@@ -344,6 +396,7 @@ class Repository(ABC):
             self._exec(cur, "DELETE FROM movimentacao WHERE local_id IN "
                             "(SELECT id FROM local WHERE evento_id = ?)", (evento_id,))
             self._exec(cur, "DELETE FROM local WHERE evento_id = ?", (evento_id,))
+            self._exec(cur, "DELETE FROM acesso WHERE evento_id = ?", (evento_id,))
             self._exec(cur, "DELETE FROM evento WHERE id = ?", (evento_id,))
             return cur.rowcount > 0
 
@@ -535,6 +588,12 @@ class SQLiteRepository(Repository):
                 horario         TEXT    NOT NULL,
                 arquivado_em    TEXT
             );
+            CREATE TABLE IF NOT EXISTS acesso (
+                token_hash  TEXT    PRIMARY KEY,
+                evento_id   INTEGER NOT NULL REFERENCES evento(id) ON DELETE CASCADE,
+                senha_marca TEXT    NOT NULL,
+                expira_em   INTEGER NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_local_evento ON local (evento_id);
             CREATE INDEX IF NOT EXISTS idx_mov_local_tipo
                 ON movimentacao (local_id, tipo_veiculo_id);
@@ -596,11 +655,12 @@ class PostgresRepository(Repository):
     def _migrar_se_preciso(self) -> None:
         """
         Aplica o schema.sql se o banco não está na versão atual (vazio, sem
-        eventos, sem arquivamento ou sem senha). O script é idempotente e migra os dados.
+        eventos, sem arquivamento, sem senha ou sem a tabela de acessos). O
+        script é idempotente e migra os dados.
         """
         def atualizado(cur):
             cur.execute(
-                "SELECT to_regclass('evento') IS NOT NULL AND ("
+                "SELECT to_regclass('evento') IS NOT NULL AND to_regclass('acesso') IS NOT NULL AND ("
                 "  SELECT COUNT(*) FROM information_schema.columns"
                 "  WHERE table_schema = current_schema() AND ("
                 "    (table_name = 'local' AND column_name = 'evento_id') OR"
