@@ -139,17 +139,14 @@ O rodapé do título mostra qual banco está ativo (`PostgreSQL ✅` / `SQLite �
 
 | Branch    | Ambiente              | Banco Supabase   | Secrets do app                          |
 |-----------|-----------------------|------------------|-----------------------------------------|
-| `develop` | **Teste** (homologação) | projeto de teste | `DATABASE_URL` do teste + `AMBIENTE = "teste"` + `SENHA_EVENTO_INICIAL` |
-| `main`    | **Produção**          | projeto real     | `DATABASE_URL` real (sem `AMBIENTE`) + `SENHA_EVENTO_INICIAL` |
+| `develop` | **Teste** (homologação) | projeto de teste | `DATABASE_URL` do teste + `SENHA_EVENTO_INICIAL` |
+| `main`    | **Produção**          | projeto real     | `DATABASE_URL` real + `SENHA_EVENTO_INICIAL` |
 
 Fluxo de trabalho:
 
 1. Crie uma branch a partir da `develop` (ex.: `feat/minha-mudanca`).
 2. Abra o PR para a **`develop`** → o app de teste atualiza → testem lá.
 3. Tudo certo? Abra um PR de **`develop` → `main`** para levar à produção.
-
-Com `AMBIENTE = "teste"` o app mostra uma faixa **⚠️ AMBIENTE DE TESTE** no topo,
-para ninguém registrar veículos reais no app errado.
 
 ## Tecnologias
 
