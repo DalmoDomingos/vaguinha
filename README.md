@@ -24,6 +24,9 @@ ocupados = Σ entradas − Σ saídas   (por área e por tipo de veículo)
   senha dele; não dá para desfazer. Quem estava com o evento aberto em outro
   aparelho vê "Evento não encontrado" e nada mais é registrado nele.
 - Botões de **entrada** e **saída** por tipo de veículo, respeitando a lotação.
+- Caixa de **quantidade** (01 a 10) ao lado dos botões: "05 Entradas" registra 5
+  veículos de uma vez (tudo ou nada: se não couberem todos, nada é registrado).
+  O número escolhido continua selecionado até alguém trocar.
 - Cada área aparece num **card na sua cor** (cabeçalho, fundo e barras). Entrada
   é o botão cheio e Saída o de contorno; área lotada fica com o cabeçalho **amarelo**.
 - Barras de ocupação (% carros, % motos, % total) e vagas restantes.

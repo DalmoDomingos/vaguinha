@@ -63,8 +63,8 @@ def _recarregar_modulos_alterados() -> str:
 VERSAO_BANCO = _recarregar_modulos_alterados()
 
 from config import COR_PADRAO, PALETA, TIPO_CARRO, TIPO_MOTO, rotulo_da_cor
-from repository import (ACESSO_HORAS, SENHA_MAX, SENHA_MIN, OperacaoInvalida,
-                        PostgresRepository, SQLiteRepository)
+from repository import (ACESSO_HORAS, QUANTIDADE_MAX, SENHA_MAX, SENHA_MIN,
+                        OperacaoInvalida, PostgresRepository, SQLiteRepository)
 
 st.set_page_config(page_title="Lotação", page_icon="🅿️", layout="centered")
 
@@ -138,6 +138,19 @@ st.markdown(
               width: auto !important;
               flex: 1 1 0 !important;
           }
+          /* caixa de quantidade (1ª coluna): só o número */
+          [class*="st-key-mov_"] [data-testid="stColumn"]:first-child {
+              flex: 0 0 4.2rem !important;
+          }
+          [class*="st-key-mov_"] [data-testid="stHorizontalBlock"] { gap: 0.4rem !important; }
+          [class*="st-key-mov_"] button { padding-left: 0.3rem !important; padding-right: 0.3rem !important; }
+          [class*="st-key-mov_"] button p { white-space: nowrap; }
+      }
+      @media (max-width: 340px) {
+          [class*="st-key-mov_"] button p { font-size: 0.78rem; }
+          [class*="st-key-mov_"] [data-testid="stColumn"]:first-child { flex: 0 0 3.7rem !important; }
+          [class*="st-key-mov_"] [data-testid="stSelectbox"] input { padding-left: 0.45rem !important; padding-right: 0 !important; }
+          [class*="st-key-mov_"] [data-testid="stSelectbox"] button { padding: 0 0.15rem !important; }
           .st-key-resumo [data-testid="stMetricValue"] { font-size: 1.5rem; }
           .st-key-resumo [data-testid="stMetricLabel"] p { font-size: 0.85rem; }
       }
@@ -419,6 +432,33 @@ AVISO_CURTO_SEGUNDOS = 4
 AVISO_LONGO_SEGUNDOS = 10
 
 
+def _chave_quantidade(tipo_id: int, local_id: int) -> str:
+    """Caixa de quantidade (1 a QUANTIDADE_MAX) de um tipo de veículo numa área."""
+    return f"qtd_{tipo_id}_{local_id}"
+
+
+def botoes_movimento(evento_id: int, tipo_id: int, local_id: int, nome_area: str):
+    """Linha [quantidade ▾] [NN Entrada] [NN Saída] de um tipo de veículo numa área."""
+    prefixo = "car" if tipo_id == TIPO_CARRO else "mot"
+    with st.container(key=f"mov_{'carro' if tipo_id == TIPO_CARRO else 'moto'}_{local_id}"):
+        q, ent, sai = st.columns([1, 2, 2])
+        with q:
+            n = st.selectbox(
+                "Quantidade", range(1, QUANTIDADE_MAX + 1), key=_chave_quantidade(tipo_id, local_id),
+                format_func=lambda v: f"{v:02d}", label_visibility="collapsed",
+                filter_mode=None,  # só escolhe da lista (sem digitar; no celular não abre o teclado)
+            )
+        plural = "s" if n > 1 else ""
+        ent.button(
+            f"{n:02d} Entrada{plural}", key=f"{prefixo}_in_{local_id}", width="stretch", type="primary",
+            on_click=registrar, args=(evento_id, tipo_id, local_id, "entrada", nome_area),
+        )
+        sai.button(
+            f"{n:02d} Saída{plural}", key=f"{prefixo}_out_{local_id}", width="stretch",
+            on_click=registrar, args=(evento_id, tipo_id, local_id, "saida", nome_area),
+        )
+
+
 def registrar(evento_id: int, tipo_id: int, local_id: int, mov: str, nome_area: str):
     """
     Registra o evento. A validação de saldo usa a capacidade e a ocupação
@@ -448,8 +488,9 @@ def registrar(evento_id: int, tipo_id: int, local_id: int, mov: str, nome_area: 
     # marca já, antes de ir ao banco: toques repetidos podem rodar ao mesmo
     # tempo que este (internet lenta) e precisam enxergar a marca
     st.session_state["ultimo_registro"] = (chave, time.monotonic())
+    quantidade = st.session_state.get(_chave_quantidade(tipo_id, local_id), 1)
     try:
-        r = repo.registrar(tipo_id, local_id, mov)
+        r = repo.registrar(tipo_id, local_id, mov, quantidade)
     except OperacaoInvalida as e:
         st.session_state["aviso_painel"] = (str(e), "⚠️", AVISO_CURTO_SEGUNDOS)
         return
@@ -459,8 +500,12 @@ def registrar(evento_id: int, tipo_id: int, local_id: int, mov: str, nome_area: 
     finally:
         st.session_state["ultimo_registro"] = (chave, time.monotonic())
 
-    veiculo = "🚗 Carro" if tipo_id == TIPO_CARRO else "🏍️ Moto"
-    verbo = "entrou" if mov == "entrada" else "saiu"
+    if quantidade == 1:
+        veiculo = "🚗 Carro" if tipo_id == TIPO_CARRO else "🏍️ Moto"
+        verbo = "entrou" if mov == "entrada" else "saiu"
+    else:
+        veiculo = f"🚗 {quantidade} carros" if tipo_id == TIPO_CARRO else f"🏍️ {quantidade} motos"
+        verbo = "entraram" if mov == "entrada" else "saíram"
     st.session_state["aviso_painel"] = (
         f"{veiculo} **{verbo}** — {nome_area} · {r['ocupados']}/{r['capacidade']}",
         "✅" if mov == "entrada" else "↩️",
@@ -795,7 +840,8 @@ TRAVA_JS = """
 (() => {
   if (window.__vgTrava) return;
   window.__vgTrava = true;
-  const FAIXAS = '[class*="st-key-mov_"]', BOTOES = FAIXAS + ' button';
+  const FAIXAS = '[class*="st-key-mov_"]';
+  const BOTOES = '[class*="st-key-car_"] button, [class*="st-key-mot_"] button';
   const MINIMO_MS = 250, MAXIMO_MS = 12000;
   let travadoEm = 0, ultimoToque = 0, viuRodando = false, observador = null;
 
@@ -939,6 +985,12 @@ CSS_CARDS = f"""
   {_CARD} [data-testid="stBaseButton-secondary"] {{
       background: transparent !important; border: 2px solid var(--cor) !important; color: var(--cor) !important; }}
   {_CARD} button p, {_CARD} button [data-testid="stIconMaterial"] {{ color: inherit !important; }}
+  {_CARD} [data-testid="stSelectbox"] [role="group"] {{
+      background: var(--cor) !important; border: 2px solid var(--cor) !important; }}
+  {_CARD} [data-testid="stSelectbox"] input {{
+      color: var(--texto-cor, #fff) !important; -webkit-text-fill-color: var(--texto-cor, #fff);
+      font-weight: 700; cursor: pointer; }}
+  {_CARD} [data-testid="stSelectbox"] svg {{ color: var(--texto-cor, #fff) !important; }}
 """
 # Área lotada: cabeçalho em faixa amarela com texto escuro
 CSS_LOTADA = "--cor:#F2B705;--texto-cor:#2F3438;"
@@ -1068,33 +1120,11 @@ def painel_areas(evento_id: int):
         with st.expander(titulo, expanded=(i == 0), key=f"area_{local_id}"):
             # ---- Motos ----
             st.markdown(f"🏍️ Motos **{ocup_moto}**/{cap_moto}")
-            with st.container(key=f"mov_moto_{local_id}"):
-                m1, m2 = st.columns(2)
-                m1.button(
-                    "Entrada", key=f"mot_in_{local_id}", width="stretch",
-                    type="primary", icon=":material/add:",
-                    on_click=registrar, args=(evento_id, TIPO_MOTO, local_id, "entrada", area["nome"]),
-                )
-                m2.button(
-                    "Saída", key=f"mot_out_{local_id}", width="stretch",
-                    icon=":material/remove:",
-                    on_click=registrar, args=(evento_id, TIPO_MOTO, local_id, "saida", area["nome"]),
-                )
+            botoes_movimento(evento_id, TIPO_MOTO, local_id, area["nome"])
 
             # ---- Carros ----
             st.markdown(f"🚗 Carros **{ocup_carro}**/{cap_carro}")
-            with st.container(key=f"mov_carro_{local_id}"):
-                c1b, c2b = st.columns(2)
-                c1b.button(
-                    "Entrada", key=f"car_in_{local_id}", width="stretch",
-                    type="primary", icon=":material/add:",
-                    on_click=registrar, args=(evento_id, TIPO_CARRO, local_id, "entrada", area["nome"]),
-                )
-                c2b.button(
-                    "Saída", key=f"car_out_{local_id}", width="stretch",
-                    icon=":material/remove:",
-                    on_click=registrar, args=(evento_id, TIPO_CARRO, local_id, "saida", area["nome"]),
-                )
+            botoes_movimento(evento_id, TIPO_CARRO, local_id, area["nome"])
 
             st.markdown(
                 f"Vagas livres: 🚗 **{max(0, cap_carro - ocup_carro)}** · "

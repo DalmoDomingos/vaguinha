@@ -56,14 +56,27 @@ class MovimentoInvalido(OperacaoInvalida):
     """Movimento recusado pela regra de saldo (área lotada / nada para dar saída)."""
 
 
-def validar_movimento(movimentacao: str, ocupados: int, capacidade: Optional[int]) -> None:
-    """Regra de saldo, avaliada com a ocupação ATUAL lida do banco."""
+QUANTIDADE_MAX = 10  # veículos de uma vez num único toque
+
+
+def validar_movimento(movimentacao: str, ocupados: int, capacidade: Optional[int],
+                      quantidade: int = 1) -> None:
+    """Regra de saldo, avaliada com a ocupação ATUAL lida do banco (tudo ou nada)."""
     if movimentacao not in ("entrada", "saida"):
         raise ValueError("movimentacao deve ser 'entrada' ou 'saida'")
-    if movimentacao == "entrada" and capacidade is not None and ocupados >= capacidade:
-        raise MovimentoInvalido("Área lotada para este tipo de veículo.")
-    if movimentacao == "saida" and ocupados <= 0:
-        raise MovimentoInvalido("Não há veículos deste tipo para dar saída.")
+    if isinstance(quantidade, bool) or not isinstance(quantidade, int) \
+            or not 1 <= quantidade <= QUANTIDADE_MAX:
+        raise OperacaoInvalida(f"A quantidade deve ser de 1 a {QUANTIDADE_MAX}.")
+    if movimentacao == "entrada" and capacidade is not None and ocupados + quantidade > capacidade:
+        if ocupados >= capacidade:
+            raise MovimentoInvalido("Área lotada para este tipo de veículo.")
+        raise MovimentoInvalido(
+            f"Só cabem mais {capacidade - ocupados} deste tipo nesta área. Nada foi registrado.")
+    if movimentacao == "saida" and ocupados < quantidade:
+        if ocupados <= 0:
+            raise MovimentoInvalido("Não há veículos deste tipo para dar saída.")
+        raise MovimentoInvalido(
+            f"Só há {ocupados} deste tipo nesta área para dar saída. Nada foi registrado.")
 
 
 def _validar_nome_evento(nome: str) -> str:
@@ -490,9 +503,11 @@ class Repository(ABC):
                     )
 
     # ---- movimentos ----
-    def registrar(self, tipo_veiculo_id: int, local_id: int, movimentacao: str) -> Dict[str, int]:
+    def registrar(self, tipo_veiculo_id: int, local_id: int, movimentacao: str,
+                  quantidade: int = 1) -> Dict[str, int]:
         """
-        Insere um evento de 'entrada' ou 'saida' com horário = agora.
+        Insere `quantidade` (1 a QUANTIDADE_MAX) movimentos de 'entrada' ou
+        'saida' com horário = agora — uma linha por veículo, todas ou nenhuma.
         A capacidade e o saldo são lidos na mesma transação do insert; se o
         movimento for recusado, levanta MovimentoInvalido.
         Retorna {"id", "ocupados", "capacidade"} — ocupados já com este movimento.
@@ -511,18 +526,20 @@ class Repository(ABC):
                 raise OperacaoInvalida("Esta área não existe mais (pode ter sido excluída).")
             capacidade = area[0] if tipo_veiculo_id == TIPO_CARRO else area[1]
             ocupados = int(area[2])
-            validar_movimento(movimentacao, ocupados, int(capacidade))
+            validar_movimento(movimentacao, ocupados, int(capacidade), quantidade)
 
+            # um único INSERT com todas as linhas (uma ida só ao banco)
+            linha = f"(?, ?, ?, {self.AGORA})"
             self._exec(
                 cur,
                 "INSERT INTO movimentacao (tipo_veiculo_id, local_id, movimentacao, horario) "
-                f"VALUES (?, ?, ?, {self.AGORA}) RETURNING id",
-                (tipo_veiculo_id, local_id, movimentacao),
+                f"VALUES {', '.join([linha] * quantidade)} RETURNING id",
+                (tipo_veiculo_id, local_id, movimentacao) * quantidade,
             )
-            novo_id = int(cur.fetchone()[0])
+            novo_id = max(int(r[0]) for r in cur.fetchall())
         return {
             "id": novo_id,
-            "ocupados": ocupados + (1 if movimentacao == "entrada" else -1),
+            "ocupados": ocupados + (quantidade if movimentacao == "entrada" else -quantidade),
             "capacidade": int(capacidade),
         }
 
